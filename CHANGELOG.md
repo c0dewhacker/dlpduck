@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.3](https://github.com/c0dewhacker/dlpduck/compare/v0.1.2...v0.1.3) (2026-09-09)
+
+
+### Features
+
+* support combined Docker deployment ([85218fc](https://github.com/c0dewhacker/dlpduck/commit/85218fc98a2574c8ed15d91bc29db4f6a1f8cffa))
+
+
+### Performance Improvements
+
+* reduce Docker image size ([0509af4](https://github.com/c0dewhacker/dlpduck/commit/0509af482432c21e8345e3fc1b654e990f4d506e))
+* reduce Docker image size by 30% ([982b24f](https://github.com/c0dewhacker/dlpduck/commit/982b24f27ba3d30b89de43edb78d5f269e82931c))
+
 ## [0.1.2](https://github.com/c0dewhacker/dlpduck/compare/v0.1.1...v0.1.2) (2026-09-09)
 
 
