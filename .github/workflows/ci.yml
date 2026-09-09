@@ -111,6 +111,7 @@ jobs:
               "quarantine": str(workdir / "quarantine"),
               "work_dir": str(workdir / "work"),
           }
+          cfg["audit"]["path"] = str(workdir / "audit")
           cfg["console"]["auth"]["users"] = []
           (workdir / "config.yaml").write_text(yaml.safe_dump(cfg))
           PY
