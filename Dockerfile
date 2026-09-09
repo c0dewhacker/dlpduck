@@ -50,19 +50,22 @@ WORKDIR /app
 COPY --from=builder --chown=dlpduck:dlpduck /app/.venv /app/.venv
 ENV PATH="/app/.venv/bin:${PATH}"
 
+COPY --chmod=755 scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+
 # Mount a config file here and pass --config /etc/dlpduck/config.yaml, or
 # any other path — nothing in the image assumes this location.
 RUN mkdir -p /etc/dlpduck && chown dlpduck:dlpduck /etc/dlpduck
 
 USER dlpduck
 
-# No default subcommand: this one image runs either role depending on the
-# command passed at `docker run` —
+# The image runs either role from its command, or both when
+# DLPDUCK_RUN_BOTH=true.
 #   docker run dlpduck run --config /etc/dlpduck/config.yaml            (watcher daemon)
 #   docker run dlpduck console run --config /etc/dlpduck/config.yaml    (admin console)
-ENTRYPOINT ["dlpduck"]
+#   docker run -e DLPDUCK_RUN_BOTH=true dlpduck --config /etc/dlpduck/config.yaml
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["--help"]
 
 # Documents the admin console's default bind (console.bind in
-# config.example.yaml); the watcher role exposes nothing.
+# config.example.yaml); irrelevant to a watcher-only container.
 EXPOSE 8080

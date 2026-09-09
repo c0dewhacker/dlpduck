@@ -398,7 +398,7 @@ def search(
     # An unbounded search is a legitimate query, not an incident — but
     # "who searched the entire archive, and for what" is a fair question
     # for a reviewer to be able to ask later.
-    audit = AuditLog(config.destination.work_dir / "audit", integrity=config.audit.integrity)
+    audit = AuditLog(config.audit_dir, integrity=config.audit.integrity)
     audit.append(
         "ui.search",
         actor=os.environ.get("DLPDUCK_ACTOR", getpass.getuser()),
@@ -460,7 +460,7 @@ def retention(config_path: str, do_apply: bool) -> None:
         click.secho("dry run — nothing deleted. Pass --apply to actually remove these.", fg="yellow")
         return
 
-    audit = AuditLog(config.destination.work_dir / "audit", integrity=config.audit.integrity)
+    audit = AuditLog(config.audit_dir, integrity=config.audit.integrity)
     removed = apply_retention(plans, audit)
     click.secho(f"removed {removed} partition(s)", fg="green")
 
@@ -492,7 +492,7 @@ def redact_audit_cmd(
     evidence but never silently.
     """
     config = load_config(config_path)
-    audit = AuditLog(config.destination.work_dir / "audit", integrity=config.audit.integrity)
+    audit = AuditLog(config.audit_dir, integrity=config.audit.integrity)
     try:
         event = audit.redact(
             seq, list(fields), reason=reason, actor=actor or getpass.getuser()
@@ -557,7 +557,7 @@ def compact_index(config_path: str, do_commit: bool) -> None:
 def verify_audit_cmd(config_path: str) -> None:
     """Walk the hash chain and report the first break, if any."""
     config = load_config(config_path)
-    audit = AuditLog(config.destination.work_dir / "audit", integrity=config.audit.integrity)
+    audit = AuditLog(config.audit_dir, integrity=config.audit.integrity)
     if audit.integrity == "none":
         click.secho("audit.integrity is 'none' — chaining is off, nothing to verify", fg="yellow")
         return

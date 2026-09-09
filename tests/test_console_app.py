@@ -7,6 +7,7 @@ and the audit timeline is hidden from a role without audit.read.
 import json
 import re
 import shutil
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -131,6 +132,29 @@ def _csrf_token(html: str) -> str:
     match = re.search(r'name="csrf_token" value="([^"]+)"', html)
     assert match, "no CSRF token found in page"
     return match.group(1)
+
+
+def test_health_endpoints_report_process_and_watcher_state(env):
+    client = env["client"]
+    assert client.get("/health/live").json() == {"status": "ok"}
+
+    missing = client.get("/health/ready")
+    assert missing.status_code == 503
+    assert missing.json()["watcher"]["stale"] is True
+
+    (env["config"].destination.work_dir / "watcher.json").write_text(
+        json.dumps(
+            {
+                "updated_at": datetime.now(UTC).isoformat(),
+                "state": "Watching",
+                "current_job": None,
+                "backlog": 0,
+            }
+        )
+    )
+    ready = client.get("/health/ready")
+    assert ready.status_code == 200
+    assert ready.json()["status"] == "ready"
 
 
 def _login(client: TestClient, username: str) -> None:

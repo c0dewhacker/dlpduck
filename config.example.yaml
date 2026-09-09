@@ -58,10 +58,11 @@ dlp:
 destination:
   archive: /data/archive/documents
   quarantine: /data/archive/quarantine   # separate mount/ACL in production
-  work_dir: /data/archive/_work          # staging, index, content, audit, failed
+  work_dir: /data/archive/_work          # staging, index, content, failed
 
 audit:
   integrity: chained               # chained | none
+  path: /data/audit                 # optional; defaults to work_dir/audit
 
 retention:
   # None (the default, shown here) means "keep forever" — retention is

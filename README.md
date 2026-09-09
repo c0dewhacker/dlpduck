@@ -102,35 +102,29 @@ written into config, the archive, or the audit trail.
 docker pull c0dewhacker/dlpduck
 ```
 
-One image, two roles selected by the command you pass — the watcher daemon or
-the admin console:
+Set `DLPDUCK_RUN_BOTH=true` to run the watcher and console together:
 
 ```bash
 docker run -d --name dlpduck \
   -e DLPDUCK_HMAC_KEY="$(openssl rand -hex 32)" \
+  -e DLPDUCK_SESSION_SECRET="$(openssl rand -hex 32)" \
+  -e DLPDUCK_RUN_BOTH=true \
   -v /srv/dlpduck/config.yaml:/etc/dlpduck/config.yaml:ro \
   -v /srv/dlpduck/drops:/srv/drops \
   -v /srv/dlpduck/archive:/srv/archive \
   -v /srv/dlpduck/quarantine:/srv/quarantine \
   -v /srv/dlpduck/work:/srv/work \
-  c0dewhacker/dlpduck run --config /etc/dlpduck/config.yaml
-
-docker run -d --name dlpduck-console \
-  -e DLPDUCK_HMAC_KEY="$(openssl rand -hex 32)" \
-  -e DLPDUCK_SESSION_SECRET="$(openssl rand -hex 32)" \
-  -v /srv/dlpduck/config.yaml:/etc/dlpduck/config.yaml:ro \
-  -v /srv/dlpduck/work:/srv/work \
-  -v /srv/dlpduck/archive:/srv/archive \
-  -v /srv/dlpduck/quarantine:/srv/quarantine \
+  -v /srv/dlpduck/audit:/srv/audit \
   -p 8080:8080 \
-  c0dewhacker/dlpduck console run --config /etc/dlpduck/config.yaml
+  c0dewhacker/dlpduck --config /etc/dlpduck/config.yaml
 ```
 
-Paths inside the config file (`source.path`, `destination.*`, `work_dir`) must
-match the container-side mount points (`/srv/drops`, `/srv/archive`, …), not
-your host paths. The image runs as a non-root user; mounted volumes need to be
-writable by it. Tags: `latest`, `<major>`, `<major>.<minor>`, `<version>`,
-published on release — see the [Dockerfile](Dockerfile).
+Set `audit.path: /srv/audit` in the config for the separate audit mount. Without
+it, audit data remains under the mounted `work_dir/audit`. The endpoints
+`/health/live` and `/health/ready` provide container liveness and watcher
+readiness checks. Omit `DLPDUCK_RUN_BOTH` and pass `run` or `console run` to run
+one role. Container paths in the config must match the mounted paths, which must
+be writable by the image's non-root user.
 
 ---
 
@@ -217,10 +211,11 @@ dlp:
 destination:
   archive: /srv/dlpduck/archive
   quarantine: /srv/dlpduck/quarantine    # a SEPARATE mount/ACL in production
-  work_dir: /srv/dlpduck/work            # index/, content/, audit/, spool/
+  work_dir: /srv/dlpduck/work            # index/, content/, failed/, spool/
 
 audit:
   integrity: chained            # chained | none
+  path: /srv/dlpduck/audit      # optional; defaults to work_dir/audit
 
 retention:                      # opt-in; unset means keep forever
   documents_days: null          # PDFs, failed queue + the content store

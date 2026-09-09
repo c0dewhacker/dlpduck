@@ -375,6 +375,20 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
         except (OSError, ValueError, KeyError):
             return {"stale": True, "state": "No worker heartbeat", "backlog": None}
 
+    @app.get("/health/live")
+    def health_live() -> dict[str, str]:
+        """Report that the console process can serve requests."""
+        return {"status": "ok"}
+
+    @app.get("/health/ready")
+    def health_ready(response: Response) -> dict[str, Any]:
+        """Report whether the watcher heartbeat is current."""
+        worker = _worker_health()
+        ready = not worker["stale"] and worker.get("state") != "Stopped"
+        if not ready:
+            response.status_code = 503
+        return {"status": "ready" if ready else "not_ready", "watcher": worker}
+
     @app.get("/failed", response_model=None)
     def failed_jobs(request: Request, resolved: bool = False, page: int = Query(1, ge=1),
                     user=Depends(require_permission("jobs.failed.manage"))):

@@ -64,6 +64,7 @@ class DestinationConfig(BaseModel):
 
 class AuditConfig(BaseModel):
     integrity: Literal["chained", "none"] = "chained"
+    path: Path | None = None
 
 
 class ConsoleUserConfig(BaseModel):
@@ -249,6 +250,11 @@ class Config(BaseModel):
     def rule_budget_seconds(self) -> float:
         return self.limits.rule_budget_ms / 1000
 
+    @property
+    def audit_dir(self) -> Path:
+        """Configured audit store, defaulting to the work directory."""
+        return self.audit.path or self.destination.work_dir / "audit"
+
     def load_rules(self) -> list[Rule]:
         return load_ruleset(self.dlp.rules, self._config_dir)
 
@@ -336,6 +342,7 @@ def validate_config(path: str | Path) -> Config:
         config.destination.archive,
         config.destination.quarantine,
         config.destination.work_dir,
+        config.audit_dir,
     ):
         dest.mkdir(parents=True, exist_ok=True)
 
