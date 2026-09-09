@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}{{ status_code }} — DLPDuck{% endblock %}
+{% block content %}
+<div class="card card--crit" style="text-align:center;">
+  <h2 style="color:var(--crit);font-family:var(--f-display);font-size:var(--fs-lg);text-transform:none;letter-spacing:0;margin:0 0 8px;">
+    {% if status_code == 403 %}Not available to your role
+    {% elif status_code == 404 %}Not found
+    {% else %}Error {{ status_code }}{% endif %}
+  </h2>
+  <p style="color:var(--ink-soft);margin:0 0 4px;">{{ detail }}</p>
+  {% if status_code == 403 and user %}
+  <p class="note" style="margin:8px 0 0;">Signed in as <strong>{{ user.username }}</strong> ({{ user.roles | join(", ") }}). Contact an administrator if you believe this is a mistake.</p>
+  {% endif %}
+  <p style="margin-top:16px;"><a href="/jobs">&larr; Back to Jobs</a></p>
+</div>
+{% endblock %}

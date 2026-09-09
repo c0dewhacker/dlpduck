@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Jobs — DLPDuck{% endblock %}
+{% block content %}
+<div class="pagehead"><h1>Jobs</h1></div>
+<form class="filters" method="get" action="/jobs">
+  <div class="filter-field"><label for="disposition">Disposition</label><select id="disposition" name="disposition">
+    <option value="">all dispositions</option>
+    {% for d in ["archive", "quarantine", "failed"] %}
+    <option value="{{ d }}" {% if filters.disposition == d %}selected{% endif %}>{{ d }}</option>
+    {% endfor %}
+  </select></div>
+  <div class="filter-field"><label for="start">From (UTC)</label><input id="start" type="date" name="start" value="{{ filters.start or '' }}"></div>
+  <div class="filter-field"><label for="end">Through (UTC)</label><input id="end" type="date" name="end" value="{{ filters.end or '' }}"></div>
+  <label class="checkbox-row"><input type="checkbox" name="pending" value="true" {% if pending %}checked{% endif %}>Awaiting release</label>
+  <button type="submit" class="btn">Filter</button><a class="btn btn-ghost" href="/jobs">Clear</a>
+</form>
+
+{% if not jobs %}
+<p class="note">No jobs match these filters.</p>
+{% else %}
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>Received</th><th>Job</th><th>Disposition</th><th>Severity</th>
+      <th>Hits</th><th>Assessment</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for job in jobs %}
+    <tr>
+      <td class="mono">{{ job.received_at }}</td>
+      <td class="mono"><a href="/jobs/{{ job.job_id }}">{{ names.get(job.job_id) or job.job_id[:12] }}</a></td>
+      <td><span class="pill {{ job.disposition }}">{{ job.disposition }}</span></td>
+      <td>{% if job.highest_severity %}<span class="chip {{ job.highest_severity|lower }}">{{ job.highest_severity }}</span>{% else %}&mdash;{% endif %}</td>
+      <td class="mono">{{ job.hit_count }}</td>
+      <td class="mono">{{ job.assessment_seq }}{% if job.release_pending %} <span class="pill">release pending</span>{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+{% include "_pagination.html" %}
+{% endblock %}

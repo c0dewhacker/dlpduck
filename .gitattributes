@@ -1,0 +1,4 @@
+*.png binary
+*.woff2 binary
+# Preserve the line endings shipped with the vendored IBM Plex license.
+dlpduck/console/static/fonts/LICENSE.txt binary

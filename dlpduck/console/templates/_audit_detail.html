@@ -1,0 +1,38 @@
+{# Renders every field of a raw audit event dict that isn't already shown
+   as its own column (seq/ts/event/job_id, plus whatever the caller's
+   headline line already covers). Event shape varies a lot by type — a
+   hand-written summary can't keep up with every field on every event
+   (ui.search's range/results, job.completed's hits list, content.purged's
+   mode, etc.) — so this stays generic instead of growing a case per type.
+#}
+{% macro detail_toggle(e, exclude) %}
+<details>
+  <summary>details</summary>
+  <dl class="kv" style="margin:6px 0 0;">
+    {% for k, v in e.items() %}
+      {% if k not in exclude %}
+      <dt>{{ k }}</dt>
+      <dd class="mono">
+        {%- if v is none -%}
+          &mdash;
+        {%- elif v is sameas true -%}
+          yes
+        {%- elif v is sameas false -%}
+          no
+        {%- elif v is sequence and v is not string -%}
+          {%- if v and v[0] is mapping -%}
+            {% for item in v %}<div>{% for ik, iv in item.items() %}{{ ik }}={{ iv }} {% endfor %}</div>{% endfor %}
+          {%- elif v -%}
+            {{ v | join(", ") }}
+          {%- else -%}
+            &mdash;
+          {%- endif -%}
+        {%- else -%}
+          {{ v }}
+        {%- endif -%}
+      </dd>
+      {% endif %}
+    {% endfor %}
+  </dl>
+</details>
+{% endmacro %}

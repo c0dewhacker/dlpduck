@@ -1,0 +1,124 @@
+# Baseline ruleset. Don't edit in place — `include:` this file from your own
+# and redefine by id. Anything you redefine wins; everything else keeps
+# tracking upstream on update. See the design doc §7 for rule anatomy and
+# guidance on writing rules that survive contact with production.
+rules:
+
+  # ── Payment data ─────────────────────────────────────────────────────
+  - id: pan.generic
+    name: "Payment card number"
+    pattern: '\b(?:\d[ -]?){12,18}\d\b'
+    validator: luhn          # turns a digit-run matcher into a real one
+    mask_keep: 4              # last four identifies the card to its holder
+    severity: HIGH             # and is permitted; every other rule stays at 0
+    action: quarantine
+
+  # ── Government identifiers ───────────────────────────────────────────
+  - id: us.ssn
+    name: "US Social Security number"
+    # Lookaheads exclude structurally invalid ranges — precision by
+    # construction, cheaper than a validator when the rules are simple.
+    pattern: '\b(?!000|666|9\d\d)\d{3}-(?!00)\d{2}-(?!0000)\d{4}\b'
+    severity: HIGH
+    action: quarantine
+
+  - id: uk.nino
+    name: "UK National Insurance number"
+    pattern: '\b[ABCEGHJKLMNOPRSTWXYZ][ABCEGHJKLMNPRSTWXYZ] ?\d{2} ?\d{2} ?\d{2} ?[A-D]\b'
+    severity: HIGH
+    action: quarantine
+
+  - id: uk.nhs
+    name: "NHS number"
+    pattern: '\b\d{3}[ -]?\d{3}[ -]?\d{4}\b'
+    validator: nhs_mod11
+    severity: HIGH
+    action: quarantine
+
+  - id: fin.iban
+    name: "IBAN"
+    pattern: '\b[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]{4}){3,7}\b'
+    validator: iban_mod97
+    severity: HIGH
+    action: quarantine
+
+  - id: uk.sortcode
+    name: "UK sort code with account number"
+    # 6 digits in 2-2-2 is also a date, a part number, a phone fragment.
+    # The label nearby is what makes it a bank detail.
+    pattern: '\b\d{2}-\d{2}-\d{2}\b'
+    requires_context:
+      pattern: '(?i)\b(?:account|acct|a/c)\s*(?:no|number|#)?\b'
+      within_lines: 2
+    severity: HIGH
+    action: quarantine
+
+  # ── Credentials & keys ───────────────────────────────────────────────
+  - id: key.private_block
+    name: "Private key block"
+    pattern: '-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----'
+    severity: CRITICAL
+    action: quarantine
+
+  - id: key.aws_access_id
+    name: "AWS access key ID"
+    pattern: '\b(?:AKIA|ASIA)[0-9A-Z]{16}\b'
+    severity: CRITICAL
+    action: quarantine
+
+  - id: cred.password_assignment
+    name: "Password in plain text"
+    pattern: '(?i)\b(?:password|passwd|pwd|passphrase)\s*[:=]\s*\S{6,}'
+    severity: HIGH
+    action: quarantine
+
+  # ── Classification markings ──────────────────────────────────────────
+  # Three rules, one pattern, three meanings. This is the overlapping-rule
+  # model doing the work it was designed for: position decides severity,
+  # and only the banner positions quarantine. Note the deliberate absence
+  # of (?i) — "SECRET" is a marking, "secret" is a word.
+  - id: mark.banner_header
+    name: "Classification banner (page header)"
+    pattern: '\b(?:OFFICIAL[ -]SENSITIVE|TOP SECRET|SECRET|CONFIDENTIAL)\b'
+    line_scope: page          # every page — not just page 1
+    min_line: 0
+    max_line: 3
+    severity: CRITICAL
+    action: quarantine
+
+  - id: mark.banner_footer
+    name: "Classification banner (page footer)"
+    pattern: '\b(?:OFFICIAL[ -]SENSITIVE|TOP SECRET|SECRET|CONFIDENTIAL)\b'
+    line_scope: page
+    from_end: true             # counted back from the last line
+    min_line: 0
+    max_line: 2
+    severity: CRITICAL
+    action: quarantine
+
+  - id: mark.body_mention
+    name: "Classification term in body"
+    pattern: '\b(?:OFFICIAL[ -]SENSITIVE|TOP SECRET|SECRET|CONFIDENTIAL)\b'
+    severity: MEDIUM
+    action: flag                # records the hit, does NOT quarantine
+
+  # ── Contact data — high volume, low harm: flag only ──────────────────
+  - id: pii.email
+    name: "Email address"
+    pattern: '\b[\w.%+-]+@[\w.-]+\.[A-Za-z]{2,}\b'
+    severity: LOW
+    action: flag
+
+  - id: pii.dob
+    name: "Date of birth"
+    pattern: '(?i)\b(?:d\.?o\.?b\.?|date of birth)\b.{0,20}?\d{1,4}'
+    severity: MEDIUM
+    action: flag
+
+  # ── Export control — off unless you handle controlled tech ───────────
+  - id: mark.itar
+    name: "ITAR / export-controlled marking"
+    pattern: '(?i)\b(?:ITAR|EAR99|export[- ]controlled)\b'
+    severity: HIGH
+    action: quarantine
+    enabled: false

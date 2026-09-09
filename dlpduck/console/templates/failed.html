@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Needs attention — DLPDuck{% endblock %}
+{% block content %}
+<div class="pagehead"><h1>Needs attention</h1><a href="/failed?resolved={{ 'false' if resolved else 'true' }}">{{ 'Open queue' if resolved else 'View resolved' }}</a></div>
+<p class="note">Unassessed and interrupted documents stay contained here. Retry after correcting the cause, or mark an item resolved with a reason. Resolving retains its file.</p>
+{% if flash %}<div class="card card--info" role="status">{{ flash }}</div>{% endif %}
+{% if not items %}<div class="card">No {{ 'resolved' if resolved else 'open' }} items.</div>{% endif %}
+{% for item in items %}
+<article class="card">
+  <h2 class="document-title">{{ item.filename }}</h2>
+  <p><span class="pill failed">{{ item.kind }}</span> {{ item.reason }}</p>
+  <p class="note">{{ item.received_at }} · {{ item.job_id[:12] }}</p>
+  {% if item.safe_pdf %}<p><a href="/failed/{{ item.kind }}/{{ item.job_id }}/pdf">Download for inspection</a></p>{% endif %}
+  {% if not resolved %}
+  <form method="post" action="/failed/{{ item.kind }}/{{ item.job_id }}/retry" class="queue-actions">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label for="reason-{{ item.kind }}-{{ item.job_id }}">Reason for action</label>
+    <input id="reason-{{ item.kind }}-{{ item.job_id }}" name="reason" required maxlength="1000">
+    {% if item.uncertain %}<label class="checkbox-row"><input type="checkbox" name="confirm_delivery" value="true">I understand retrying delivery may send it twice.</label>{% endif %}
+    <div class="field-row">
+      {% if item.safe_pdf %}<button class="btn btn-primary" type="submit">{{ 'Retry delivery' if item.uncertain else 'Retry processing' }}</button>{% endif %}
+      <button class="btn" type="submit" formaction="/failed/{{ item.kind }}/{{ item.job_id }}/resolve">Mark resolved</button>
+    </div>
+  </form>
+  {% endif %}
+</article>
+{% endfor %}
+{% include "_pagination.html" %}
+{% endblock %}

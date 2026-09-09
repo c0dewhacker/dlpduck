@@ -1,0 +1,133 @@
+version: 2
+
+# Everything written here is sensitive — archived PDFs, the content store,
+# the audit log — and all of it inherits the process umask, which the
+# daemon and console set from this value before writing anything. "0077"
+# is owner-only; "0027" adds a reviewer group; null inherits the shell's.
+umask: "0077"
+
+source:
+  name: "mfp-floor-3"
+  path: /data/printer_drops        # mount SMB/S3 here at the OS layer, not in-app
+  pdf_suffix: .pdf
+  metadata_format: xml             # xml | json | text | none
+  metadata_suffix: .xml
+  # Allowlist; every other key is dropped (§6.4) — from BOTH the companion
+  # file and the PDF's own Info dictionary (pdf_title, pdf_author,
+  # pdf_subject, pdf_creator, pdf_producer, pdf_created_at,
+  # pdf_modified_at), which is extracted unconditionally so a bare PDF
+  # with no companion still yields something. Nothing here is exempt from
+  # the allowlist just because it came from the PDF instead of the XML —
+  # a declared Title can leak exactly as much as a filename can.
+  metadata_fields:
+    [device_id, user_id, job_type, submitted_at, page_count]
+  poll_seconds: 5
+  stability_polls: 2               # size must hold across N polls before claim
+  # A companion file is a convenience, never a requirement (§2) — a bare
+  # PDF dropped with nothing alongside it is still processed, after this
+  # many EXTRA stable-size polls waiting for a companion that might
+  # genuinely be en route. 0 = claim immediately, no waiting at all.
+  metadata_grace_polls: 3
+
+limits:
+  max_bytes: 209715200             # 200 MB — rejected at claim
+  max_pages: 500
+  rule_budget_ms: 2000             # per document, per rule — ReDoS guard
+  # A companion metadata file comes from the same drop folder as the PDF.
+  # Real scanner metadata is a few KB; anything past this is ignored and
+  # audited rather than read into memory.
+  max_metadata_bytes: 1048576      # 1 MB
+
+extraction:
+  dpi: 150
+  native_min_chars: 20             # per page (§5.1)
+  # Extraction runs in a disposable child process, so a parser or OCR
+  # model that wedges on a hostile PDF cannot stall ingestion forever —
+  # the child is killed at the timeout and the job fails closed. Set
+  # isolate_worker false only to debug in-process; a hang then takes the
+  # daemon with it.
+  timeout_seconds: 120
+  isolate_worker: true
+
+dlp:
+  quarantine_on_degraded: true     # fail closed (§3.2)
+  hmac_key_env: DLPDUCK_HMAC_KEY   # key never appears in config
+  rules:
+    - include: builtin:default.yaml
+
+destination:
+  archive: /data/archive/documents
+  quarantine: /data/archive/quarantine   # separate mount/ACL in production
+  work_dir: /data/archive/_work          # staging, index, content, audit, failed
+
+audit:
+  integrity: chained               # chained | none
+
+retention:
+  # None (the default, shown here) means "keep forever" — retention is
+  # opt-in per store, never a surprise default that starts deleting data.
+  documents_days: null             # PDFs (including failed queue) + content store
+  index_days: null
+  audit_days: null                 # audit almost always outlives content
+
+console:
+  # host:port. IPv6 literals go in brackets — "[::1]:8080". A bind the
+  # console could not actually listen on fails `validate-config` rather
+  # than the daemon's first second of life.
+  bind: "127.0.0.1:8080"
+  session_secret_env: DLPDUCK_SESSION_SECRET
+  # Sessions have a server-side revocation record. This remains the maximum
+  # lifetime of a session that is not revoked sooner. 8h = one working day.
+  session_max_age_seconds: 28800
+  # Set true wherever the console is reached over a network, so the
+  # session cookie is marked Secure and never crosses plain HTTP. It
+  # defaults to false only so http://127.0.0.1 works out of the box.
+  session_cookie_secure: false
+  # Search terms are keyed digests by default: investigations commonly
+  # search for the sensitive value itself, and the audit trail outlives the
+  # document. Repeated searches still correlate. Select plain only where
+  # recording the exact operator query is an explicit policy choice.
+  audit_search_terms: hashed     # hashed | plain
+  auth:
+    # Failed local logins before that username, or that client address, is
+    # refused until the lockout expires. This bounds password guessing, but
+    # the sharper reason is availability: verifying a password is
+    # deliberately expensive (argon2id), and the equal-time path for an
+    # unknown username costs the same — so without a ceiling, a few hundred
+    # concurrent POSTs to /login take the console down without needing a
+    # valid username at all. Both keys are counted, because per-username
+    # alone lets one host spray every account and per-address alone lets a
+    # botnet grind one.
+    max_failed_logins: 10
+    lockout_seconds: 300
+    # OIDC is the primary path (§10.4) — an external IdP authenticates
+    # the person, roles come from an ID token claim. Configure this,
+    # `users` below, both, or neither (an install with neither still
+    # starts, it just has no way to log in — add at least one).
+    oidc:
+      issuer: "https://idp.example/realms/dlpduck"   # discovery read from <issuer>/.well-known/openid-configuration
+      client_id: dlpduck-console
+      client_secret_env: DLPDUCK_OIDC_CLIENT_SECRET
+      roles_claim: roles           # ID token claim carrying the user's roles/groups
+      role_map:                    # external name -> internal role; identity if unmapped
+        dlp-admins: dlp_admin
+        soc-analysts: investigator
+        compliance-team: auditor
+    # Local accounts: the air-gapped fallback and the break-glass admin
+    # path for when the IdP is unreachable. Never a plaintext password —
+    # hash one with `dlpduck console hash-password`.
+    users:
+      - username: breakglass
+        password_hash: "$argon2id$v=19$..."
+        role: dlp_admin
+
+# Emit-phase plugins forward a job's outcome to a SIEM (§9) — best
+# effort, spooled and retried on failure, never blocking the pipeline.
+# The audit trail itself (JSONL, hash-chained) is not a plugin; it's
+# built into every commit and always on. Uncomment to enable a sink:
+# plugins:
+#   - name: webhook                # or: syslog | static_enrich | a "path" to your own
+#     critical: false
+#     args:
+#       url: "https://siem.internal/hooks/dlpduck"
+#       secret_env: DLPDUCK_WEBHOOK_SECRET

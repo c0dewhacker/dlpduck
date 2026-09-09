@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}Rules — DLPDuck{% endblock %}
+{% block content %}
+<div class="pagehead">
+  <h1>Rules</h1>
+  <span class="sub">ruleset <span class="mono">{{ ruleset_version }}</span> &middot; {{ rules|length }} rule(s) loaded</span>
+</div>
+
+<div class="table-wrap">
+<table>
+  <thead>
+    <tr>
+      <th>ID</th><th>Name</th><th>Severity</th><th>Action</th><th>Scope</th><th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for r in rules %}
+    <tr style="cursor:pointer;" data-rule="{{ r.id }}">
+      <td class="mono">{{ r.id }}</td>
+      <td>{{ r.name }}</td>
+      <td><span class="chip {{ r.severity|lower }}">{{ r.severity }}</span></td>
+      <td class="mono">{{ r.action }}</td>
+      <td class="mono">
+        {{ r.scope }}{% if r.min_line is not none or r.max_line is not none %} &middot; {{ r.line_scope }}{% if r.from_end %} end{% endif %} [{{ r.min_line if r.min_line is not none else "" }},{{ r.max_line if r.max_line is not none else "" }}]{% endif %}
+      </td>
+      <td><span class="btn btn-ghost btn-sm" style="pointer-events:none;">Details &rarr;</span></td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+
+{% for r in rules %}
+<dialog id="rule-{{ r.id }}" class="modal" style="width:min(560px, 92vw);">
+  <div class="modal-head"><h3>{{ r.name }}</h3></div>
+  <div class="modal-body">
+    <dl class="kv" style="grid-template-columns:110px 1fr;">
+      <dt>id</dt><dd class="mono">{{ r.id }}</dd>
+      <dt>severity</dt><dd><span class="chip {{ r.severity|lower }}">{{ r.severity }}</span></dd>
+      <dt>action</dt><dd class="mono">{{ r.action }}</dd>
+      <dt>scope</dt><dd class="mono">{{ r.scope }}</dd>
+      <dt>position</dt>
+      <dd class="mono">
+        {% if r.min_line is not none or r.max_line is not none %}
+          {{ r.line_scope }}{% if r.from_end %} (from end){% endif %}
+          [{{ r.min_line if r.min_line is not none else "" }}, {{ r.max_line if r.max_line is not none else "" }}]
+        {% else %}whole document{% endif %}
+      </dd>
+      <dt>validator</dt><dd class="mono">{{ r.validator or "none" }}</dd>
+      <dt>reveal</dt><dd class="mono">{% if r.mask_keep %}last {{ r.mask_keep }} chars{% else %}fully masked{% endif %}</dd>
+      <dt>context</dt>
+      <dd class="mono">
+        {% if r.requires_context %}{{ r.requires_context }} (&plusmn;{{ r.context_window }} lines){% else %}none required{% endif %}
+      </dd>
+    </dl>
+    <div>
+      <label style="display:block;font-family:var(--f-mono);font-size:var(--fs-2xs);text-transform:uppercase;letter-spacing:0.07em;color:var(--ink-faint);margin-bottom:5px;">pattern</label>
+      <div class="mono" style="white-space:pre-wrap;word-break:break-word;background:var(--surface-sunk);border:1px solid var(--line);border-radius:3px;padding:var(--sp-3);font-size:var(--fs-sm);max-height:200px;overflow:auto;">{{ r.pattern }}</div>
+    </div>
+  </div>
+  <div class="modal-actions">
+    <button type="button" class="btn btn-ghost" data-close-rule="{{ r.id }}">Close</button>
+  </div>
+</dialog>
+{% endfor %}
+
+{# One delegated listener rather than an onclick per row: a rule id is
+   config-supplied, and interpolating it into inline JS would make a
+   crafted id in an imported ruleset executable. As a data attribute it is
+   only ever data. #}
+<script>
+document.addEventListener("click", function (e) {
+  var open = e.target.closest("[data-rule]");
+  if (open) { document.getElementById("rule-" + open.dataset.rule).showModal(); return; }
+  var close = e.target.closest("[data-close-rule]");
+  if (close) { document.getElementById("rule-" + close.dataset.closeRule).close(); }
+});
+</script>
+{% endblock %}

@@ -1,0 +1,255 @@
+{% extends "base.html" %}
+{% import "_audit_detail.html" as ad %}
+{% block title %}{{ job.job_id[:12] }} — DLPDuck{% endblock %}
+{% block content %}
+<p><a href="/jobs">← Jobs</a></p>
+<div class="pagehead">
+  <h1>{{ receipts[0].filename if receipts else job.job_id[:12] }}</h1>
+  <div style="display:flex;gap:6px;">
+    <span class="pill {{ job.disposition }}">{{ job.disposition }}</span>
+    {% if document_purged %}
+    <span class="pill purged-hard">{% if purge_confirmed %}purged &middot; hard{% else %}document gone{% endif %}</span>
+    {% elif content_purged %}
+    <span class="pill purged-soft">{% if purge_confirmed %}content purged{% else %}content gone{% endif %}</span>
+    {% endif %}
+  </div>
+</div>
+
+<div class="card {{ 'card--crit' if job.disposition == 'quarantine' or job.release_pending else 'card--info' }}">
+  <strong>{{ 'Awaiting approval to leave quarantine' if job.release_pending else ('Held in quarantine' if job.disposition == 'quarantine' else 'Archived') }}</strong>
+  <p>{{ (job.reason or 'No quarantine rule matched')|replace('_', ' ') }}.</p>
+  <p>Extraction: {{ 'Incomplete — inspect the original before release' if job.degraded else 'Completed' }} · {{ job.page_count }} page(s), {{ job.ocr_page_count }} via OCR.</p>
+  {% if can_view_pdf and not document_purged %}<a class="btn" href="/jobs/{{ job.job_id }}/pdf" target="_blank" rel="noopener">Open original PDF ↗</a> <a class="btn" href="/jobs/{{ job.job_id }}/pdf/download">Download PDF</a>{% endif %}
+</div>
+{% if document_purged %}
+<div class="card card--crit">
+  {% if purge_confirmed %}
+  <strong>This job's original PDF has been hard-purged.</strong>
+  {% else %}
+  <strong>This job's original PDF is no longer on disk.</strong> No purge is recorded for it, so
+  this is most likely a retention sweep (see <span class="mono">retention.documents_days</span>) —
+  the Audit screen has the <span class="mono">retention.applied</span> events.
+  {% endif %}
+  The document and its extracted text are both gone — only this masked index record and the audit
+  trail remain. This cannot be undone.
+</div>
+{% elif content_purged %}
+<div class="card" style="border-left:3px solid var(--high);">
+  {% if purge_confirmed %}
+  <strong>This job's content has been purged.</strong>
+  {% else %}
+  <strong>This job's content is no longer in the content store.</strong> No purge is recorded for
+  it — most likely a retention sweep.
+  {% endif %}
+  Full text is no longer searchable and hits can't be re-derived, but the original PDF is still
+  archived below.
+</div>
+{% endif %}
+
+{% if flash %}<div role="status" class="card {{ 'card--crit' if flash.startswith('Not released') else 'card--info' }}">{{ flash }}</div>{% endif %}
+
+<div class="card">
+  <h2>Hits ({{ job.hit_count }})</h2>
+  {% if not can_see_hits %}
+  <p class="denied">You don't have dlp.hits.read — hit details are hidden.</p>
+  {% elif not job.hits %}
+  <p class="note">No hits.</p>
+  {% else %}
+  {% for h in job.hits %}
+  <div class="hitcard sev-{{ h.severity }}">
+    <div><strong>{{ h.rule_name }}</strong> <span class="chip {{ h.severity|lower }}">{{ h.severity }}</span>
+      <span class="mono hit-meta">p{{ h.page_number }} L{{ h.line_number }} &middot; action={{ h.action }}</span></div>
+    <div class="hitline">{{ h.masked_text }}</div>
+    {% if revealed and revealed.index == loop.index0 %}
+    <div class="hitline revealed">
+      {% if revealed.value is not none %}revealed: {{ revealed.value }}{% else %}unable to re-derive the value — content unavailable{% endif %}
+    </div>
+    {% elif can_reveal %}
+    <form method="post" action="/jobs/{{ job.job_id }}/reveal" style="margin-top:6px;">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="hit_index" value="{{ loop.index0 }}">
+      <button type="submit" class="btn btn-danger btn-sm">Reveal</button>
+    </form>
+    {% endif %}
+  </div>
+  {% endfor %}
+  {% endif %}
+</div>
+
+<div class="card">
+  <details><summary>Technical details and identifiers</summary>
+  <dl class="kv">
+    <dt>received</dt><dd>{{ job.received_at }}</dd>
+    <dt>assessed</dt><dd>{{ job.assessed_at }} (assessment {{ job.assessment_seq }}{% if job.supersedes_seq %}, supersedes {{ job.supersedes_seq }}{% endif %})</dd>
+    <dt>ruleset</dt><dd>{{ job.ruleset_version }}</dd>
+    <dt>pages</dt><dd>{{ job.page_count }} ({{ job.ocr_page_count }} via OCR)</dd>
+    <dt>degraded</dt><dd>{{ job.degraded }}{% if job.min_ocr_confidence is not none %} &middot; min OCR confidence {{ "%.2f"|format(job.min_ocr_confidence) }}{% endif %}</dd>
+    <dt>pdf sha256</dt><dd>{{ job.pdf_sha256 }}</dd>
+    <dt>archive path</dt><dd>{{ job.archive_path }}</dd>
+    <dt>release pending</dt><dd>{{ 'yes' if job.release_pending else 'no' }}</dd>
+    <dt>pdf</dt>
+    <dd>
+      {% if not can_view_pdf %}
+      <span class="denied">you don't have {{ pdf_permission_needed }} &mdash; the original PDF is hidden</span>
+      {% elif document_purged %}
+      <span class="denied">hard-purged &mdash; the original PDF was deleted and can no longer be previewed or downloaded</span>
+      {% else %}
+      <a href="/jobs/{{ job.job_id }}/pdf" target="_blank" rel="noopener">preview &rarr;</a>
+      &middot;
+      <a href="/jobs/{{ job.job_id }}/pdf/download">download &darr;</a>
+      {% endif %}
+    </dd>
+  </dl></details>
+
+  {% if job.release_pending and can_release %}
+  <form method="post" action="/jobs/{{ job.job_id }}/release" class="field-row" style="margin-top:var(--sp-4);">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label for="release-reason">Reason for release</label><input id="release-reason" type="text" name="reason" required style="flex:1;min-width:200px;">
+    <button type="submit" class="btn btn-primary">Release</button>
+  </form>
+  {% endif %}
+
+  {% if may_purge and not can_purge %}
+  <p class="denied" style="margin-top:var(--sp-4);">nothing left to purge &mdash; content and the original PDF are both already deleted</p>
+  {% elif can_purge %}
+  <div style="margin-top:var(--sp-4);">
+    <button type="button" class="btn btn-danger" onclick="document.getElementById('purge-modal').showModal()">Purge content&hellip;</button>
+    {% if content_purged %}<span class="note" style="padding-left:var(--sp-2);">content already purged &mdash; a hard purge would still delete the PDF</span>{% endif %}
+  </div>
+
+  <dialog id="purge-modal" class="modal" aria-labelledby="purge-title">
+    <form method="post" action="/jobs/{{ job.job_id }}/purge">
+      <div class="modal-head"><h3 id="purge-title">Purge content</h3></div>
+      <div class="modal-body">
+        {% if purge_error %}<p class="modal-error">{{ purge_error.message }}</p>{% endif %}
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div>
+          <label for="purge-reason">Reason</label>
+          <input id="purge-reason" type="text" name="reason" required autocomplete="off"
+                 value="{{ purge_error.reason if purge_error else '' }}">
+        </div>
+        <label class="checkbox-row">
+          <input type="checkbox" name="hard" value="true" {% if purge_error and purge_error.hard %}checked{% endif %}>
+          Also permanently delete the original PDF
+        </label>
+        <div>
+          <label for="purge-confirm-text">Type <code>purge</code> to confirm</label>
+          <input id="purge-confirm-text" type="text" name="confirm_text" required autocomplete="off">
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" onclick="document.getElementById('purge-modal').close()">Cancel</button>
+        <button type="submit" class="btn btn-danger solid">Confirm purge</button>
+      </div>
+    </form>
+  </dialog>
+  {% if purge_error %}
+  <script>document.getElementById('purge-modal').showModal();</script>
+  {% endif %}
+  {% endif %}
+</div>
+
+{% if may_reprocess or reprocess_result %}
+<div class="card">
+  <h2>Reprocess</h2>
+  <p class="note" style="padding:0 0 var(--sp-3);">Preview the effect of the current rules on this document before applying a new assessment. Current ruleset: <span class="mono">{{ live_ruleset }}</span>.</p>
+
+  {% if not reprocessable %}
+  <p class="denied">can't reprocess &mdash; this job was hard-purged, so there is neither stored text to re-scan nor a PDF to re-extract</p>
+  {% elif content_purged %}
+  <p class="denied">content was purged &mdash; <span class="mono">rules</span> mode has nothing to re-scan; use <span class="mono">extract</span> to re-derive it from the PDF</p>
+  {% endif %}
+
+  {% if reprocess_result %}
+  {% set o = reprocess_result.outcome %}
+  <div class="card {% if reprocess_result.action == 'commit' %}card--ok{% else %}card--info{% endif %}" style="margin-bottom:var(--sp-3);">
+    <strong>{{ "Committed" if reprocess_result.action == "commit" else "Preview" }}</strong>
+    (mode={{ reprocess_result.mode }}) &mdash;
+    {% if not o %}no job in scope.
+    {% elif o.direction == "content_unavailable" %}content unavailable (purged) &mdash; nothing to reassess.
+    {% else %}
+      <span class="mono">{{ o.direction }}</span>:
+      disposition {{ o.old_disposition }} &rarr; {{ o.new_disposition }},
+      severity {{ o.old_severity or "none" }} &rarr; {{ o.new_severity or "none" }},
+      hits {{ o.old_hit_count }} &rarr; {{ o.new_hit_count }}
+      {% if reprocess_result.action == "preview" %}&mdash; nothing written.{% endif %}
+      {% if reprocess_result.action == "commit" and o.direction == "deescalate" %}&mdash; flagged release_pending; the PDF was not moved.{% endif %}
+    {% endif %}
+  </div>
+  {% endif %}
+
+  {% if can_reprocess_preview %}
+  <form method="post" action="/jobs/{{ job.job_id }}/reprocess" class="field-row">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label for="reprocess-mode">Assessment method</label><select id="reprocess-mode" name="mode">
+      <option value="rules" {% if content_purged %}disabled{% endif %}>Re-scan stored text</option>
+      <option value="extract" {% if content_purged %}selected{% endif %} {% if document_purged %}disabled{% endif %}>Re-extract PDF and scan</option>
+    </select>
+    <button type="submit" name="reprocess_action" value="preview" class="btn">Preview changes</button>
+    {% if can_reprocess_commit %}
+    <button type="submit" name="reprocess_action" value="commit" class="btn btn-primary">Apply new assessment</button>
+    {% endif %}
+  </form>
+  {% if not can_reprocess_commit %}
+  <p class="denied" style="margin-top:var(--sp-3);">you don't have jobs.reprocess.commit &mdash; preview only</p>
+  {% endif %}
+  {% endif %}
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>Document metadata</h2>
+  {% if doc_metadata %}
+  <dl class="kv">
+    {% for k, v in doc_metadata | dictsort %}
+    <dt>{{ k }}</dt><dd>{{ v }}</dd>
+    {% endfor %}
+  </dl>
+  {% elif not metadata_allowlist %}
+  <p class="denied">no metadata was kept &mdash; <span class="mono">source.metadata_fields</span> is empty, so every field supplied with this document was dropped at ingest</p>
+  {% else %}
+  <p class="note">Nothing was supplied for this document. Allowlisted fields:
+    {% for f in metadata_allowlist %}<span class="rolechip plain">{{ f }}</span> {% endfor %}</p>
+  {% endif %}
+
+  {% if audit_fields %}
+  <h2 style="margin-top:var(--sp-5);">Audit fields</h2>
+  <dl class="kv">
+    {% for k, v in audit_fields | dictsort %}
+    <dt>{{ k }}</dt><dd>{{ v }}</dd>
+    {% endfor %}
+  </dl>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Audit</h2>
+  {% if not can_see_audit %}
+  <p class="denied">You don't have audit.read — the timeline is hidden.</p>
+  {% elif not audit_events %}
+  <p class="note">No audit events found for this job.</p>
+  {% else %}
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Seq</th><th>Time</th><th>Event</th><th>Detail</th></tr></thead>
+    <tbody>
+    {% for e in audit_events %}
+      <tr>
+        <td class="mono">{{ e.seq }}</td>
+        <td class="mono">{{ e.ts }}</td>
+        <td class="mono">{{ e.event }}</td>
+        <td class="mono">
+          {% if e.direction %}{{ e.direction }}{% endif %}
+          {% if e.disposition %}&rarr; {{ e.disposition }}{% endif %}
+          {% if e.reason %}({{ e.reason }}){% endif %}
+          {{ ad.detail_toggle(e, ["seq", "ts", "event", "job_id", "disposition", "direction", "reason"]) }}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% endif %}
+</div>
+{% if receipts %}<div class="card"><h2>Receipt history</h2><p class="note">Each arrival is recorded separately. Identical document bytes share one assessment history.</p><div class="table-wrap"><table><thead><tr><th>Received (UTC)</th><th>Filename</th><th>Source</th><th>Metadata</th><th>Result</th></tr></thead><tbody>{% for receipt in receipts %}<tr><td>{{ receipt.received_at }}</td><td>{{ receipt.filename }}</td><td>{{ receipt.source }}</td><td>{% if receipt.metadata %}<details><summary>View</summary><dl class="kv">{% for key, value in receipt.metadata|dictsort %}<dt>{{ key }}</dt><dd>{{ value }}</dd>{% endfor %}</dl></details>{% else %}&mdash;{% endif %}</td><td>{{ receipt.status }}</td></tr>{% endfor %}</tbody></table></div></div>{% endif %}
+{% endblock %}

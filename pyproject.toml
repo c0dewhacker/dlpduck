@@ -1,0 +1,100 @@
+[project]
+name = "dlpduck"
+version = "0.1.0"
+description = "Line-aware OCR/DLP document ingestion engine"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "pymupdf>=1.24",
+  "rapidocr-onnxruntime>=1.3",
+  "pyarrow>=17.0",
+  "pydantic>=2.10",
+  "pyyaml>=6.0",
+  "click>=8.1",
+  "duckdb>=1.5.5",
+  "pytz>=2026.3.post1",
+  "fastapi>=0.141.1",
+  "jinja2>=3.1.6",
+  "python-multipart>=0.0.32",
+  "itsdangerous>=2.2.0",
+  "argon2-cffi>=25.1.0",
+  "uvicorn[standard]>=0.52.4",
+  "authlib>=1.8.0",
+  # authlib.integrations.starlette_client imports httpx unconditionally, so
+  # the console cannot start without it. It was previously dev-only, which
+  # meant the suite passed and `pip install dlpduck && dlpduck console run`
+  # died on ModuleNotFoundError — a whole half of the product, unusable on
+  # every clean install.
+  "httpx>=0.28.1",
+  "regex>=2026.9.3",
+]
+
+[project.scripts]
+dlpduck = "dlpduck.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["dlpduck"]
+
+[dependency-groups]
+dev = [
+  "hypothesis>=6.100",
+  "mypy>=2.3.1",
+  "pip-audit>=2.10.1",
+  "pytest>=8.3",
+  "pytest-cov>=7.1",
+  "ruff>=0.16.6",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+# E501 (line length) is handled by the formatter's judgement, not enforced —
+# several comments here are deliberately prose and wrap where they read best.
+select = ["E", "F", "W", "I", "UP", "B", "S"]
+ignore = [
+  "E501",
+  "S101",  # asserts are the point in tests
+  # S608 fires on the two f-string SQL queries (search.py,
+  # reprocess.py). Both interpolate ONLY fixed column lists and
+  # placeholder-only WHERE fragments — every value is bound. It is
+  # suppressed here rather than inline because a `# noqa` on a
+  # multi-line f-string literal ends up inside the query text.
+  "S608",
+  # UP042 wants StrEnum for Severity. That would change str(Severity.HIGH)
+  # from "Severity.HIGH" to "HIGH" — a serialisation change on a type that
+  # reaches Parquet, JSON payloads and the audit trail, for a purely
+  # cosmetic gain. Declined deliberately.
+  "UP042",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S", "B011", "B017"]
+# B008 flags a function call in a default argument — which is exactly how
+# FastAPI declares Depends()/Form(), so it is the idiom here, not a bug.
+"dlpduck/console/app.py" = ["B008"]
+"dlpduck/cli.py" = ["B008"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true          # pymupdf, rapidocr and duckdb ship no stubs
+# union-attr is excluded, not silenced case by case. It reports one thing:
+# JobContext.text is Optional (it is set once extraction completes), and
+# every consumer downstream of commit reads it unconditionally. That
+# invariant is real and now enforced at the boundary — Pipeline.commit
+# raises if text is None — but expressing it in the type would mean
+# threading DocumentText explicitly through index, content and reprocess.
+# Excluding the code keeps mypy a gate that catches annotations which are
+# actually WRONG (it caught a handler declared -> HTMLResponse that
+# returned a redirect) rather than one drowned in a known modelling gap.
+disable_error_code = ["union-attr"]

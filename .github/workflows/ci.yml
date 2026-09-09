@@ -1,0 +1,171 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A PR only needs the newest run; cancel anything it superseded.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run ruff check .
+      - name: Type check
+        run: uv run mypy dlpduck/
+
+  audit-dependencies:
+    # A tool that inspects other people's documents should know what is in
+    # its own dependency tree. PyMuPDF parses untrusted PDFs and is the
+    # largest piece of attack surface here, so a known CVE in it is a
+    # release blocker, not a notification.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run pip-audit --skip-editable
+
+  test:
+    runs-on: ubuntu-latest
+    # The OCR integration tests run a real model over a rasterised page,
+    # so this is minutes rather than seconds. That is the point of them.
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - name: Run the suite
+        run: uv run pytest -q --cov=dlpduck --cov-report=term --cov-report=xml
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.xml
+          if-no-files-found: ignore
+
+  shipped-config:
+    # DLPDuck's own advice is to run validate-config in CI (it compiles
+    # every regex and checks every path), so it runs against the example
+    # config and default ruleset here. This is what stops the shipped
+    # example drifting away from the schema it is supposed to demonstrate.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - name: Validate the shipped example config
+        run: |
+          set -euo pipefail
+          export DLPDUCK_HMAC_KEY=ci-only-not-a-real-key
+          export DLPDUCK_OIDC_CLIENT_SECRET=ci-only-not-a-real-secret
+          workdir="$(mktemp -d)"
+          # Written into a temp directory, deliberately away from the repo:
+          # the shipped config includes `builtin:default.yaml`, which has to
+          # resolve from the installed package rather than from a path next
+          # to the config. Validating it here from somewhere with no rules/
+          # directory is the same shape as an operator's config in /etc, and
+          # is what would have caught the ruleset not shipping in the wheel.
+          uv run python - "$workdir" <<'PY'
+          import pathlib
+          import sys
+
+          import yaml
+
+          workdir = pathlib.Path(sys.argv[1])
+          cfg = yaml.safe_load(pathlib.Path("config.example.yaml").read_text())
+          (workdir / "drops").mkdir(parents=True, exist_ok=True)
+          cfg["source"]["path"] = str(workdir / "drops")
+          cfg["destination"] = {
+              "archive": str(workdir / "archive"),
+              "quarantine": str(workdir / "quarantine"),
+              "work_dir": str(workdir / "work"),
+          }
+          cfg["console"]["auth"]["users"] = []
+          (workdir / "config.yaml").write_text(yaml.safe_dump(cfg))
+          PY
+          uv run dlpduck validate-config --config "$workdir/config.yaml"
+
+  fresh-install:
+    # The suite runs inside the dev environment, so it structurally cannot
+    # see the difference between a runtime dependency and a dev one, or
+    # notice an asset that lives beside the package rather than inside it.
+    # Both have bitten: the console died on `ModuleNotFoundError: httpx`
+    # for every clean install, and the baseline ruleset the quick start
+    # tells people to include wasn't in the wheel at all. This job is the
+    # only thing that looks at what a user actually receives.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Build the wheel
+        run: uv build --wheel -o dist
+      - name: Install it alone, with no dev group
+        run: |
+          set -euo pipefail
+          uv venv /tmp/fresh
+          uv pip install --python /tmp/fresh/bin/python dist/*.whl
+      - name: Run the README's own quick start against it
+        run: |
+          set -euo pipefail
+          export DLPDUCK_HMAC_KEY=ci-only-not-a-real-key
+          export DLPDUCK_SESSION_SECRET=ci-only-not-a-real-secret
+          workdir="$(mktemp -d)"
+          cd "$workdir"
+          mkdir -p srv/{drops,archive,quarantine,work}
+          cat > config.yaml <<'CFG'
+          source: {name: ci, path: srv/drops, metadata_format: none}
+          destination: {archive: srv/archive, quarantine: srv/quarantine, work_dir: srv/work}
+          dlp:
+            rules:
+              - include: builtin:default.yaml
+          CFG
+          # Deliberately run from a directory with no checkout in sight:
+          # `builtin:` has to resolve out of the installed package.
+          /tmp/fresh/bin/dlpduck validate-config --config config.yaml
+      - name: Boot the console and check it serves its own assets
+        run: |
+          set -euo pipefail
+          export DLPDUCK_HMAC_KEY=ci-only-not-a-real-key
+          export DLPDUCK_SESSION_SECRET=ci-only-not-a-real-secret
+          workdir="$(mktemp -d)"
+          cd "$workdir"
+          mkdir -p srv/{drops,archive,quarantine,work}
+          cat > config.yaml <<'CFG'
+          source: {name: ci, path: srv/drops, metadata_format: none}
+          destination: {archive: srv/archive, quarantine: srv/quarantine, work_dir: srv/work}
+          dlp:
+            rules:
+              - include: builtin:default.yaml
+          CFG
+          /tmp/fresh/bin/dlpduck console run --config config.yaml &
+          console_pid=$!
+          trap 'kill "$console_pid" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 30); do
+            curl -fsS -o /dev/null http://127.0.0.1:8080/login && break
+            sleep 1
+          done
+          # The login page, and the font it needs — an install missing the
+          # bundled woff2 files renders in a fallback face and says nothing.
+          curl -fsS -o /dev/null http://127.0.0.1:8080/login
+          curl -fsS http://127.0.0.1:8080/static/fonts.css \
+            | grep -o "/static/fonts/[^']*" | sort -u \
+            | while read -r url; do curl -fsS -o /dev/null "http://127.0.0.1:8080$url"; done

@@ -1,0 +1,5 @@
+{% if previous_url or next_url %}<nav class="pagination" aria-label="Results pages">
+  {% if previous_url %}<a class="btn" href="{{ previous_url }}">Previous</a>{% endif %}
+  {% if page %}<span class="note">Page {{ page }}</span>{% endif %}
+  {% if next_url %}<a class="btn" href="{{ next_url }}">Next</a>{% endif %}
+</nav>{% endif %}

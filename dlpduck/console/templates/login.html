@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Log in — DLPDuck{% endblock %}
+{% block content %}
+{% if loggedout %}
+<div class="authdivider" style="margin-top:0;">You've been signed out.</div>
+{% endif %}
+{% if oidc_enabled %}
+<a href="/login/oidc" class="sso-btn">Log in with SSO</a>
+<div class="authdivider">or use a local account</div>
+{% endif %}
+<form class="login" method="post" action="/login">
+  {% if error %}<div class="error" role="alert">{{ error }}</div>{% endif %}
+  <label for="username">Username</label><input id="username" autocomplete="username" type="text" name="username" placeholder="Username" autofocus required>
+  <label for="password">Password</label><input id="password" autocomplete="current-password" type="password" name="password" placeholder="Password" required>
+  <button type="submit" class="btn">Log in</button>
+</form>
+{% endblock %}

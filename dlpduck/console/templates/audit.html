@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% import "_audit_detail.html" as ad %}
+{% block title %}Audit — DLPDuck{% endblock %}
+{% block content %}
+<div class="pagehead"><h1>Audit trail</h1></div>
+
+<form class="filters" method="get" action="/audit">
+  <div class="filter-field"><label for="start">From (UTC)</label><input id="start" type="date" name="start" value="{{ filters.start or '' }}" placeholder="start"></div>
+  <div class="filter-field"><label for="end">Through (UTC)</label><input id="end" type="date" name="end" value="{{ filters.end or '' }}" placeholder="end"></div>
+  <button type="submit" class="btn">Filter</button>
+</form>
+
+{% if can_verify %}
+<form method="post" action="/audit/verify" style="margin-bottom:var(--sp-4);">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <button type="submit" class="btn">Verify chain</button>
+</form>
+{% if verify_result is not none %}
+<div class="card {% if verify_result.ok %}card--ok{% else %}card--crit{% endif %}">
+  {% if verify_result.ok %}
+    Chain intact.
+  {% else %}
+    {{ verify_result.breaks|length }} break(s) found: {{ verify_result.detail }}
+  {% endif %}
+</div>
+{% if verify_result.redactions %}
+<div class="card" style="border-left:3px solid var(--high);">
+  <strong>{{ verify_result.redactions|length }} event(s) redacted.</strong>
+  Content was deliberately removed from these, so the chain no longer attests to
+  what they said — only that nothing around them was inserted, removed or
+  reordered. Each removal is recorded as its own <span class="mono">audit.redacted</span>
+  event naming who did it and why.
+  <div class="mono" style="margin-top:var(--sp-2);font-size:var(--fs-xs);">{{ verify_result.redaction_detail }}</div>
+</div>
+{% endif %}
+{% endif %}
+{% endif %}
+
+{% if not events %}
+<p class="note">No events in this range.</p>
+{% else %}
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Seq</th><th>Time</th><th>Event</th><th>Job</th><th>Detail</th></tr></thead>
+  <tbody>
+    {% for e in events %}
+    <tr>
+      <td class="mono">{{ e.seq }}</td>
+      <td class="mono">{{ e.ts }}</td>
+      <td class="mono">{{ e.event }}</td>
+      <td class="mono">{% if e.job_id %}<a href="/jobs/{{ e.job_id }}">{{ e.job_id[:12] }}</a>{% else %}&mdash;{% endif %}</td>
+      <td class="mono">
+        {% if e.disposition %}{{ e.disposition }}{% endif %}
+        {% if e.direction %}{{ e.direction }}{% endif %}
+        {% if e.reason %}({{ e.reason }}){% endif %}
+        {% if e.actor %}by {{ e.actor }}{% endif %}
+        {{ ad.detail_toggle(e, ["seq", "ts", "event", "job_id", "disposition", "direction", "reason", "actor"]) }}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+<p class="note">{{ events|length }} event(s) shown (most recent first).</p>
+{% endif %}
+{% include "_pagination.html" %}
+{% endblock %}

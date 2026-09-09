@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}Overview — DLPDuck{% endblock %}
+{% block content %}
+<div class="pagehead">
+  <h1>Overview</h1>
+  <span class="sub">as of this request</span>
+</div>
+
+<div class="stat-grid">
+  <a href="/jobs" class="stat-tile">
+    <div class="label">Jobs indexed</div>
+    <div class="value">{{ stats.total }}</div>
+  </a>
+  <a href="/jobs?start={{ today }}&end={{ today }}" class="stat-tile">
+    <div class="label">Received today</div>
+    <div class="value">{{ stats.today }}</div>
+  </a>
+  <a href="/jobs?disposition=quarantine" class="stat-tile {% if stats.quarantined %}alert{% endif %}">
+    <div class="label">Quarantined</div>
+    <div class="value">{{ stats.quarantined }}</div>
+  </a>
+  <a href="/jobs?pending=true" class="stat-tile {% if stats.release_pending %}warn{% endif %}">
+    <div class="label">Release pending</div>
+    <div class="value">{{ stats.release_pending }}</div>
+  </a>
+  <a href="/failed" class="stat-tile {% if stats.failed %}alert{% endif %}">
+    <div class="label">Failed (needs operator)</div>
+    <div class="value">{{ stats.failed }}</div>
+  </a>
+</div>
+
+<div class="card {{ 'card--crit' if health.stale or health.state == 'Stopped' else 'card--info' }}">
+  <h2>Ingestion worker</h2>
+  <p>{{ 'Heartbeat overdue — check the daemon' if health.stale else health.state }}{% if health.backlog is not none %} · {{ health.backlog }} PDF(s) in the drop folder{% endif %}</p>
+  {% if health.updated_at %}<p class="note">Last heartbeat {{ health.updated_at }} (UTC). Extraction is limited to {{ extraction_timeout }} seconds per document.</p>{% endif %}
+</div>
+{% if can_verify %}
+<div class="card">
+  <h2>Audit chain</h2>
+  {% if chain_status == "chained" %}
+    <p class="note" style="color:var(--accent);">integrity: chained</p>
+  {% elif chain_status == "none" %}
+    <p class="note">integrity: off (audit.integrity: none)</p>
+  {% endif %}
+  <p class="note">Run <code>dlpduck verify-audit</code> or the Audit screen's Verify button to confirm the chain is intact.</p>
+</div>
+{% endif %}
+
+{% if recent_jobs %}
+<div class="card card--flush">
+  <div style="padding:var(--sp-4) var(--sp-5) 0;"><h2>Most recently received</h2></div>
+  <div class="table-wrap" style="border:none;">
+  <table>
+    <thead><tr><th>Received</th><th>Job</th><th>Disposition</th><th>Severity</th></tr></thead>
+    <tbody>
+      {% for job in recent_jobs %}
+      <tr>
+        <td class="mono">{{ job.received_at }}</td>
+        <td class="mono"><a href="/jobs/{{ job.job_id }}">{{ names.get(job.job_id) or job.job_id[:12] }}</a></td>
+        <td><span class="pill {{ job.disposition }}">{{ job.disposition }}</span></td>
+        <td>{% if job.highest_severity %}<span class="chip {{ job.highest_severity|lower }}">{{ job.highest_severity }}</span>{% else %}&mdash;{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+{% endif %}
+{% endblock %}

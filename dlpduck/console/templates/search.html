@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}Search — DLPDuck{% endblock %}
+{% block content %}
+<div class="pagehead"><h1>Search</h1></div>
+<form class="filters" method="get" action="/search">
+  <div class="filter-field"><label for="q">Search document text</label><input id="q" type="text" name="q" value="{{ filters.q or '' }}" placeholder="search text..." style="flex:1;min-width:220px;"></div>
+  <div class="filter-field"><label for="severity">Severity</label><select id="severity" name="severity">
+    <option value="">any severity</option>
+    {% for s in ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"] %}
+    <option value="{{ s }}" {% if filters.severity == s %}selected{% endif %}>{{ s }}</option>
+    {% endfor %}
+  </select></div>
+  <div class="filter-field"><label for="start">From (UTC)</label><input id="start" type="date" name="start" value="{{ filters.start or '' }}"></div>
+  <div class="filter-field"><label for="end">Through (UTC)</label><input id="end" type="date" name="end" value="{{ filters.end or '' }}"></div>
+  <button type="submit" class="btn btn-primary">Search</button>
+</form>
+
+{% if error %}
+<p class="note" style="color:var(--crit);">{{ error }}</p>
+{% elif response is not none %}
+  {% if response.unbounded %}
+  <p class="note">No date range given — scanned the full index ({{ "%.2f"|format(response.elapsed_seconds) }}s).</p>
+  {% endif %}
+  {% if not response.results %}
+  <p class="note">No results.</p>
+  {% else %}
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Received</th><th>Job</th><th>Disposition</th><th>Severity</th><th>Hits</th><th>Snippet</th></tr></thead>
+    <tbody>
+      {% for r in response.results %}
+      <tr>
+        <td class="mono">{{ r.received_at }}</td>
+        <td class="mono"><a href="/jobs/{{ r.job_id }}">{{ names.get(r.job_id) or r.job_id[:12] }}</a></td>
+        <td><span class="pill {{ r.disposition }}">{{ r.disposition }}</span></td>
+        <td>{% if r.highest_severity %}<span class="chip {{ r.highest_severity|lower }}">{{ r.highest_severity }}</span>{% else %}&mdash;{% endif %}</td>
+        <td class="mono">{{ r.hit_count }}</td>
+        <td class="mono">
+          {% if r.snippet_withheld %}
+          <span class="denied">quarantined &mdash; excerpt needs jobs.pdf.read.quarantined</span>
+          {% else %}&hellip;{{ r.snippet }}&hellip;{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <p class="note">{{ response.results|length }} result(s) in {{ "%.2f"|format(response.elapsed_seconds) }}s
+    {% if response.truncated %}(more results available on the next page){% endif %}</p>
+  {% endif %}
+{% endif %}
+{% include "_pagination.html" %}
+{% endblock %}

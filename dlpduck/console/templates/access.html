@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Access — DLPDuck{% endblock %}
+{% block content %}
+<div class="pagehead"><h1>Access</h1></div>
+<p class="note">
+  Accounts are defined in <code>console.auth.users</code> in the running config file, not in a
+  database this screen can write to — account configuration is read-only here. Sessions can be revoked below. Add or remove a user by editing
+  config.yaml and restarting the console; hash a new password with <code>dlpduck console
+  hash-password</code>.
+</p>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Username</th><th>Roles</th></tr></thead>
+  <tbody>
+    {% for u in users %}
+    <tr>
+      <td class="mono">{{ u.username }}</td>
+      <td>{% for r in u.roles %}<span class="rolechip plain" style="margin-right:3px;">{{ r }}</span>{% endfor %}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+<div class="card" style="margin-top:24px"><h2>Revoke active sessions</h2><p>Sign a user out of every browser, including SSO sessions in this console. Prevent future sign-ins by disabling their account in local configuration or the identity provider.</p>
+{% if request.query_params.get('revoked') %}<p role="status">Active console sessions revoked.</p>{% endif %}
+<form method="post" action="/access/revoke" class="queue-actions"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><label for="revoke-user">Username</label><select id="revoke-user" name="username" required><option value="">Choose an account</option>{% for u in users %}<option value="{{ u.username }}">{{ u.username }}</option>{% endfor %}</select><label for="revoke-reason">Reason</label><input id="revoke-reason" name="reason" required maxlength="1000"><button class="btn btn-danger" type="submit">Revoke all sessions</button></form></div>
+{% endblock %}
