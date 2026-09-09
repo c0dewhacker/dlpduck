@@ -11,7 +11,7 @@
   </select></div>
   <div class="filter-field"><label for="start">From (UTC)</label><input id="start" type="date" name="start" value="{{ filters.start or '' }}"></div>
   <div class="filter-field"><label for="end">Through (UTC)</label><input id="end" type="date" name="end" value="{{ filters.end or '' }}"></div>
-  <label class="checkbox-row"><input type="checkbox" name="pending" value="true" {% if pending %}checked{% endif %}>Awaiting release</label>
+  {% if pending %}<input type="hidden" name="pending" value="true">{% endif %}
   <button type="submit" class="btn">Filter</button><a class="btn btn-ghost" href="/jobs">Clear</a>
 </form>
 
