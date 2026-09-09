@@ -16,6 +16,14 @@
   <img alt="Local-first processing" src="https://img.shields.io/badge/Processing-local--first-2C5C86?style=flat-square">
 </p>
 
+<p align="center">
+  <a href="https://github.com/c0dewhacker/dlpduck/actions/workflows/ci.yml"><img alt="CI status" src="https://github.com/c0dewhacker/dlpduck/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/c0dewhacker/dlpduck/actions/workflows/build.yml"><img alt="Build status" src="https://github.com/c0dewhacker/dlpduck/actions/workflows/build.yml/badge.svg"></a>
+  <a href="https://github.com/c0dewhacker/dlpduck/actions/workflows/security.yml"><img alt="Dependency security status" src="https://github.com/c0dewhacker/dlpduck/actions/workflows/security.yml/badge.svg"></a>
+  <a href="https://github.com/c0dewhacker/dlpduck/actions/workflows/codeql.yml"><img alt="CodeQL status" src="https://github.com/c0dewhacker/dlpduck/actions/workflows/codeql.yml/badge.svg"></a>
+  <a href="https://github.com/c0dewhacker/dlpduck/actions/workflows/release-please.yml"><img alt="Release automation status" src="https://github.com/c0dewhacker/dlpduck/actions/workflows/release-please.yml/badge.svg"></a>
+</p>
+
 ---
 
 DLPDuck watches a PDF drop folder, extracts native text and OCR page by page,

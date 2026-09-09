@@ -17,8 +17,17 @@ uv run mypy dlpduck/
 uv run pip-audit --skip-editable    # this tool should know its own dependencies
 ```
 
-CI runs exactly those, plus `dlpduck validate-config` against the shipped
-example — so if they pass locally, they pass there.
+The CI and Security workflows run those checks, while Build validates the wheel,
+source distribution, packaged assets, and a clean installation. CI also runs
+`dlpduck validate-config` against the shipped example.
+
+## Releases
+
+Release Please collects conventional commits on `main` into a release PR.
+Use `feat:`, `fix:`, or `perf:` for user-facing changes; `deps:` records a
+dependency update. Merging the release PR creates a `vX.Y.Z` GitHub release and
+attaches the built wheel and source distribution. The release PR also keeps the
+version in `pyproject.toml` and the local package entry in `uv.lock` aligned.
 
 `mypy` runs with `union-attr` disabled, and the reason is in `pyproject.toml`:
 that code reports one known modelling gap (`JobContext.text` is `Optional` but

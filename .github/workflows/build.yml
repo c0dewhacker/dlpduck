@@ -1,0 +1,90 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    name: Build and inspect distributions
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Build wheel and source distribution
+        run: uv build --out-dir dist
+      - name: Validate distribution metadata
+        run: uvx twine check dist/*
+      - name: Install the wheel into a clean environment
+        run: |
+          set -euo pipefail
+          uv venv /tmp/dlpduck-wheel --python 3.12
+          uv pip install --python /tmp/dlpduck-wheel/bin/python dist/*.whl
+          /tmp/dlpduck-wheel/bin/dlpduck --help
+      - name: Verify packaged rules and console assets
+        run: |
+          /tmp/dlpduck-wheel/bin/python - <<'PY'
+          from importlib.resources import files
+
+          package = files("dlpduck")
+          required = [
+              "builtin_rules/default.yaml",
+              "console/templates/base.html",
+              "console/static/mascot.png",
+              "console/static/fonts.css",
+          ]
+          missing = [path for path in required if not package.joinpath(path).is_file()]
+          if missing:
+              raise SystemExit(f"wheel is missing packaged files: {missing}")
+          PY
+      - name: Smoke-test the installed CLI and console
+        env:
+          DLPDUCK_HMAC_KEY: ci-only-not-a-real-key
+          DLPDUCK_SESSION_SECRET: ci-only-not-a-real-secret
+        run: |
+          set -euo pipefail
+          workdir="$(mktemp -d)"
+          cd "$workdir"
+          mkdir -p srv/{drops,archive,quarantine,work}
+          cat > config.yaml <<'YAML'
+          source: {name: ci, path: srv/drops, metadata_format: none}
+          destination: {archive: srv/archive, quarantine: srv/quarantine, work_dir: srv/work}
+          dlp:
+            rules:
+              - include: builtin:default.yaml
+          YAML
+          /tmp/dlpduck-wheel/bin/dlpduck validate-config --config config.yaml
+          /tmp/dlpduck-wheel/bin/dlpduck console run --config config.yaml &
+          console_pid=$!
+          trap 'kill "$console_pid" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 30); do
+            if curl -fsS -o /dev/null http://127.0.0.1:8080/login; then
+              break
+            fi
+            sleep 1
+          done
+          curl -fsS -o /dev/null http://127.0.0.1:8080/login
+          curl -fsS -o /dev/null http://127.0.0.1:8080/static/mascot.png
+      - name: Upload distributions
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dlpduck-distributions
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30

@@ -113,7 +113,12 @@ class TestTheProjectIsPackagedForRelease:
     def test_ci_runs_the_checks_contributing_promises(self):
         """CONTRIBUTING tells a contributor that passing locally means
         passing in CI. That is only true if CI runs the same things."""
-        ci = (REPO / ".github" / "workflows" / "ci.yml").read_text()
+        # Checks are split by purpose so a dependency-advisory outage does
+        # not obscure whether the code itself passed lint and tests.
+        ci = "\n".join(
+            path.read_text()
+            for path in (REPO / ".github" / "workflows").glob("*.yml")
+        )
         for command in ("ruff check", "pytest", "mypy", "pip-audit", "validate-config"):
             assert command in ci, f"CI does not run {command!r}"
 
