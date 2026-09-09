@@ -18,9 +18,10 @@ tests
 .coverage
 coverage.xml
 
-# Docs and repo-local tooling — not needed inside the image
+# Docs and repo-local tooling — not needed inside the image.
+# scripts/ is NOT excluded: docker-entrypoint.sh lives there and the
+# Dockerfile COPYs it in.
 docs
-scripts
 .claude
 CONTRIBUTING.md
 SECURITY.md

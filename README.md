@@ -42,9 +42,7 @@ documents under new rules, approve releases, and purge retained content.
 | Evidential history | Keeps append-only assessments and a verifiable, hash-chained audit log |
 
 > [!NOTE]
-> DLPDuck is pre-1.0. The security model is deliberate and extensively tested,
-> but production deployments should pin a revision and follow the
-> [security guidance](SECURITY.md).
+> DLPDuck is pre-1.0. Pin a version in production.
 
 ---
 
@@ -52,79 +50,28 @@ documents under new rules, approve releases, and purge retained content.
 
 - [How it works](#how-it-works)
 - [Install](#install)
+- [Docker](#docker)
 - [Quick start](#quick-start)
 - [Configuration](#configuration)
 - [Writing rules](#writing-rules)
-- [The two stores, and what purge actually deletes](#the-two-stores-and-what-purge-actually-deletes)
-- [The audit trail](#the-audit-trail)
+- [Storage, purge, and maintenance](#storage-purge-and-maintenance)
+- [Audit trail](#audit-trail)
 - [Admin console](#admin-console)
 - [CLI reference](#cli-reference)
 - [Writing plugins](#writing-plugins)
-- [Security notes](#security-notes)
-- [Development](#development)
 
 ---
 
 ## How it works
 
-```
-   drop folder
-        │
-        │  1. watch — wait for the file to stop growing
-        ▼
-   ┌─────────┐
-   │  claim  │  move into a job-scoped staging dir; job_id = blake2b(pdf bytes)
-   └────┬────┘  refuse symlinks; enforce max_bytes
-        ▼
-   ┌─────────┐
-   │ extract │  per page: native text when sufficient; OCR sparse/image pages
-   └────┬────┘  OCR boxes are clustered into visual rows, not raw top-edge order
-        ▼
-   ┌─────────┐
-   │  scan   │  every rule against every line (or the joined document text)
-   └────┬────┘  masked at match time — the raw value is never stored
-        ▼
-   ┌─────────┐
-   │ enrich  │  enrich-phase plugins run HERE, before routing, so they can
-   └────┬────┘  attach context that changes the decision
-        ▼
-   ┌─────────┐
-   │ dispose │  quarantine if any hit says so, or if extraction was degraded
-   └────┬────┘
-        ▼
-   ┌─────────┐   archive/ or quarantine/   (the PDF)
-   │ commit  │─▶ index/                    (permanent metadata, masked hits)
-   └────┬────┘   content/                  (raw full text — the purgeable part)
-        │        audit/                    (hash-chained JSONL)
-        ▼
-   ┌─────────┐
-   │  emit   │  emit-phase plugins/sinks run last, best-effort, spooled on failure
-   └─────────┘
-```
+1. The watcher waits until a PDF stops changing, then moves it into staging.
+2. Each page uses native text when suitable and OCR when it is sparse or contains images.
+3. Rules inspect lines or the complete document and mask every recorded match.
+4. Enrichment plugins can add routing context before the final decision.
+5. Clean documents enter the archive; matches and incomplete extraction enter quarantine.
+6. DLPDuck writes the PDF, searchable content, assessment index, and audit event before notifying emit plugins.
 
-Two properties are worth calling out, because most of the design follows from
-them:
-
-**Fail closed.** If any page fails to extract, the document is marked `degraded`
-and quarantined rather than being silently assessed on partial text. A rule that
-exceeds its time budget fails the job rather than being skipped. And a document
-that yielded *no* text at all — a scan too faint for OCR, an unmappable font, a
-damaged content stream — is quarantined as `no_text_extracted`, because "we read
-nothing" is not evidence of "there is nothing to find". All three are governed by
-`dlp.quarantine_on_degraded`. A file refused before a job even exists — over
-`limits.max_bytes`, or a symlink planted in the drop folder — is moved to
-`failed/` and audited too, rather than being left where it was and retried on
-every poll forever.
-
-Parsing and OCR run in a disposable worker process by default. The configured
-`extraction.timeout_seconds` bounds the whole extraction; a worker that exceeds
-it is terminated and the document enters the Needs attention queue. A page that
-contains embedded images is OCR'd even when it also has a native text heading,
-and a page that yields no native or OCR text makes the extraction incomplete.
-
-**Never store the raw match.** A hit records a *masked* form (`••••1111`) plus a
-keyed HMAC digest for correlation. "This same value appeared in 12 documents" is
-answerable without any of those documents storing the value.
+A file that cannot be assessed never passes as clean. Findings contain masked text and a keyed correlation digest, never the raw matched value.
 
 ---
 
@@ -144,18 +91,40 @@ export DLPDUCK_HMAC_KEY="$(openssl rand -hex 32)"        # correlation digests
 export DLPDUCK_SESSION_SECRET="$(openssl rand -hex 32)"  # console cookie signing
 ```
 
-`DLPDUCK_HMAC_KEY` must be stable for the life of a deployment — rotating it
-makes previously-stored correlation digests incomparable with new ones. It must
-never be written into config, the archive, or the audit trail.
+`DLPDUCK_HMAC_KEY` must be stable for the life of a deployment and must never be
+written into config, the archive, or the audit trail.
 
-> **Upgrade note — correlation digests changed.** Values are now normalised with
-> Unicode case folding (NFKC + `casefold`) instead of an ASCII-only rule that
-> silently discarded every non-Latin character. The old behaviour reduced *any*
-> wholly non-ASCII value to the empty string, so a Cyrillic name, a Japanese
-> address and a Greek identifier all shared one digest and correlated as the same
-> value. Digests written before this change won't match ones written after it, in
-> exactly the way a key rotation wouldn't; run `dlpduck reprocess --commit` to
-> re-derive them if you rely on correlation across older documents.
+---
+
+## Docker
+
+```bash
+docker pull c0dewhacker/dlpduck
+```
+
+Set `DLPDUCK_RUN_BOTH=true` to run the watcher and console together:
+
+```bash
+docker run -d --name dlpduck \
+  -e DLPDUCK_HMAC_KEY="$(openssl rand -hex 32)" \
+  -e DLPDUCK_SESSION_SECRET="$(openssl rand -hex 32)" \
+  -e DLPDUCK_RUN_BOTH=true \
+  -v /srv/dlpduck/config.yaml:/etc/dlpduck/config.yaml:ro \
+  -v /srv/dlpduck/drops:/srv/drops \
+  -v /srv/dlpduck/archive:/srv/archive \
+  -v /srv/dlpduck/quarantine:/srv/quarantine \
+  -v /srv/dlpduck/work:/srv/work \
+  -v /srv/dlpduck/audit:/srv/audit \
+  -p 8080:8080 \
+  c0dewhacker/dlpduck --config /etc/dlpduck/config.yaml
+```
+
+Set `audit.path: /srv/audit` in the config for the separate audit mount. Without
+it, audit data remains under the mounted `work_dir/audit`. The endpoints
+`/health/live` and `/health/ready` provide container liveness and watcher
+readiness checks. Omit `DLPDUCK_RUN_BOTH` and pass `run` or `console run` to run
+one role. Container paths in the config must match the mounted paths, which must
+be writable by the image's non-root user.
 
 ---
 
@@ -242,10 +211,11 @@ dlp:
 destination:
   archive: /srv/dlpduck/archive
   quarantine: /srv/dlpduck/quarantine    # a SEPARATE mount/ACL in production
-  work_dir: /srv/dlpduck/work            # index/, content/, audit/, spool/
+  work_dir: /srv/dlpduck/work            # index/, content/, failed/, spool/
 
 audit:
   integrity: chained            # chained | none
+  path: /srv/dlpduck/audit      # optional; defaults to work_dir/audit
 
 retention:                      # opt-in; unset means keep forever
   documents_days: null          # PDFs, failed queue + the content store
@@ -257,7 +227,7 @@ console:
   session_secret_env: DLPDUCK_SESSION_SECRET
   session_max_age_seconds: 28800     # 8h; sessions can be revoked sooner
   session_cookie_secure: false       # set true behind TLS
-  audit_search_terms: hashed         # hashed | plain — see Security notes
+  audit_search_terms: hashed         # hashed avoids storing search queries
   auth:
     max_failed_logins: 10       # then that username/address waits out the lockout
     lockout_seconds: 300
@@ -281,21 +251,15 @@ plugins:
     args: {url: https://soc.example/hook, secret_env: DLPDUCK_WEBHOOK_SECRET}
 ```
 
-### `metadata_fields` is an allowlist
-
-Whatever a companion file (or the PDF's own Info dictionary) carries, **only the
-keys named in `source.metadata_fields` are kept**. An empty list — the default —
-keeps nothing. This is deliberate: scanner metadata routinely carries user names,
-network paths, and device serials that you do not want copied into a permanent
-index. Name the fields you actually want:
+`metadata_fields` is an **allowlist** — only keys named here survive from a
+companion file or the PDF's own Info dictionary; an empty list (the default)
+keeps nothing. PDF-derived keys are prefixed `pdf_` (`pdf_title`, `pdf_author`,
+…); where both set a key, the companion wins.
 
 ```yaml
 source:
   metadata_fields: [device_id, department, pdf_title]
 ```
-
-PDF-derived keys are prefixed `pdf_` (`pdf_title`, `pdf_author`, …). Where a
-companion file and the PDF both set a key, the companion wins.
 
 ---
 
@@ -386,149 +350,38 @@ dlpduck test-rules ./corpus --config config.yaml --rule-id fin.iban
 
 ---
 
-## The two stores, and what purge actually deletes
+## Storage, purge, and maintenance
 
-Ingest writes to two Parquet stores, and the split is the whole basis of the
-purge model:
-
-| | `index/` | `content/` |
+| Store | Contents | Purge behaviour |
 |---|---|---|
-| Holds | metadata, disposition, **masked** hits | raw `full_text` + structured lines |
-| Rows | one per **assessment** (append-only history) | one per job (no history) |
-| Purpose | permanent proof the job happened | what makes a job searchable |
-| Purge deletes it? | **never** | yes — that's what a purge *is* |
+| `index/` | Metadata, disposition, and masked findings | Retained as assessment history |
+| `content/` | Searchable raw text and structured lines | Deleted by purge |
+| `archive/` and `quarantine/` | Original PDFs | Deleted only by hard purge or retention |
 
-So:
+```bash
+dlpduck purge-content <job_id>            # delete extracted content
+dlpduck purge-content <job_id> --hard     # also delete the original PDF
+dlpduck compact-index --config config.yaml --commit
+dlpduck reindex --config config.yaml --commit
+```
 
-- **Soft purge** (`dlpduck purge-content <job_id>`) deletes the job's content
-  file. The document stops being searchable and hits can no longer be revealed.
-  The index row, the archived PDF, and the audit trail are untouched — the record
-  that the job existed and what was decided about it survives, and none of them
-  ever held the raw text.
-- **Hard purge** (`--hard`) additionally deletes the archived PDF. A real erasure.
-  The index row and audit trail still survive.
-
-Neither rewrites history. A purge appends one new audit event describing itself.
+Stores use UTC `dt=YYYY-MM-DD` partitions. Configure retention per store; unset windows keep data indefinitely. `compact-index` merges completed daily index partitions, while `reindex` reconstructs missing index rows without restoring content previously recorded as purged.
 
 ---
 
-## Dates are UTC, everywhere
+## Audit trail
 
-`dt=` partitions — for the archive, the index, the content store and the audit
-log alike — are named from the UTC date, and the console's date filters mean UTC
-days. On a machine east of UTC the local calendar can already be tomorrow while
-the current partition is still yesterday's, so "today" in a filter is a UTC
-today. This is deliberate: partition names have to agree with each other and
-with the audit trail across every host that touches the archive, and only UTC
-does that.
-
-Purged content stays purged. `dlpduck reindex` — which rebuilds a lost index by
-re-extracting from the archived PDFs — checks the audit trail first and refuses to
-re-create content for a job that was purged, because a soft purge leaves the PDF
-and re-extracting it would silently make erased text searchable again. The index
-row is still rebuilt (a soft purge never touched it); the row is marked
-`content-withheld` and the operator is told. Restoring that text is then a
-deliberate `dlpduck reprocess --mode extract`, not a side effect of recovery.
-
-### Keeping the index fast
-
-The write path produces one small Parquet file per assessment, which is what
-makes it atomic and safe under contention. The read path pays for it: DuckDB
-opens every file in the glob, so the jobs list and the Overview counters slow
-down linearly with the number of documents ever ingested — and the index is
-permanent by default. Almost all of that size is per-file overhead rather than
-data. Measured on 20,000 single-row assessments:
-
-| | files | index size | jobs-list query |
-|---|---|---|---|
-| before | 20,000 | 180.4 MB | 2.64 s |
-| after  | 1 | 0.5 MB | 0.02 s |
-
-```bash
-dlpduck compact-index --config config.yaml            # what it would merge
-dlpduck compact-index --config config.yaml --commit
-```
-
-Run it from cron. It is safe against a live system and safe to interrupt: the
-merged file becomes visible *before* the originals are removed, so the only
-window is one where every row is present twice — which every reader already
-collapses to one row per job. Today's partition is never touched, because it is
-still being appended to.
-
-## The audit trail
-
-`work_dir/audit/dt=YYYY-MM-DD/events.jsonl`, one JSON event per line, each
-carrying `seq`, `ts`, `event`, and — when `audit.integrity: chained` — `prev`
-(the previous event's hash) and its own `hash`. That makes silent edits
-detectable:
+Audit events live under `work_dir/audit/dt=YYYY-MM-DD/events.jsonl`. With `audit.integrity: chained`, each event links to the previous event so edits are detectable.
 
 ```bash
 dlpduck verify-audit --config config.yaml
-```
-
-Retention can delete whole old partitions. Doing that naively would make the
-oldest surviving event's `prev` point at a hash nothing on disk can reproduce,
-and `verify` would report it as tampering. `apply_retention` therefore writes a
-**trim checkpoint** recording that hash before deleting, so an authorised trim
-reads as a recorded fact rather than a hole.
-
-Events include: `job.completed`, `job.failed`, `job.reassessed`, `job.released`,
-`purge.started`, `content.purged`, `dlp.revealed`, `pdf.viewed`, `pdf.downloaded`,
-`ui.search`, `reprocess.started`, `reprocess.completed`, `index.rebuilt`,
-`retention.started`, `retention.applied`, `metadata.rejected`, `plugin.failed`,
-`audit.redacted`, `auth.succeeded`, `auth.failed`, `auth.throttled`, `auth.logout`.
-
-### Redacting a single event
-
-Retention is all-or-nothing on a partition. Sometimes one field in one event is
-the problem — a search term, a filename inside a parse error — and an erasure
-request means it cannot stay:
-
-```bash
 dlpduck redact-audit --config config.yaml \
   --seq 4182 --field query --reason "erasure request 41"
 ```
 
-That empties the named fields in place, leaving `[redacted]` behind. The event
-keeps its position in the chain, so `verify-audit` still proves nothing around
-it was inserted, removed or reordered — what it stops proving is that one
-event's contents. `seq`, `ts`, `event`, `prev` and `hash` cannot be redacted;
-removing them would break the chain rather than annotate it. Naming a field the
-event doesn't have, or one that can't be redacted, fails the whole call and
-removes nothing — a half-completed erasure reported as success is worse than a
-refusal.
-
-The removal is itself an `audit.redacted` event, chained like any other and
-naming who did it and why. `verify-audit` reports every redacted event even
-when the chain is clean, because "intact" and "intact, with three events
-emptied" are different answers. An event marked redacted with no matching
-`audit.redacted` record — content blanked by hand, in other words — is
-reported as a **break**, and so is one emptied in more fields than the records
-account for, so a single authorised redaction can't be stretched to cover
-later ones.
-
-Irreversible operations record their **intent before acting** and their outcome
-after: `purge.started` then `content.purged`, `retention.started` then
-`retention.applied`. The append is fsync'd, so a crash partway through leaves a
-started record with no completion — visible evidence that a deletion was in
-flight, rather than data quietly gone with nothing saying anyone asked for it.
+Redaction replaces selected event fields with `[redacted]`, preserves the chain, and records who performed it and why. Purge and retention record intent before making irreversible changes.
 
 ---
-
-## Behaviour as the archive grows
-
-Three reads have no natural bound, and all three are on the hot path:
-
-| Read | Bounded by |
-|---|---|
-| `/audit` | Newest partitions first, stopping at the page size — safe because `seq` rises with time, so nothing older can displace what's already in hand. |
-| A job's timeline | Every partition is still searched (a purge lands long after ingest), but a substring test rejects records before they're decoded. |
-| `/jobs` | Server-side filters followed by stable, 100-row pagination. |
-| Overview counters | Aggregated in DuckDB rather than by loading every row into Python to count it. |
-
-None of these are tuning: before them, a year of modest traffic meant 127MB and
-2.6s to render 500 audit rows, and 48MB to display a job list — both growing for
-as long as the deployment runs, since audit retention is opt-in.
 
 ## Admin console
 
@@ -536,22 +389,15 @@ as long as the deployment runs, since audit retention is opt-in.
 dlpduck console run --config config.yaml
 ```
 
-Screens: Overview, Jobs, job detail (findings first, receipt history, metadata,
+Screens: Overview, Jobs, job detail (findings, receipt history, metadata,
 reveal, reprocess, purge, audit timeline), Needs attention, Search, Rules,
-Audit, Access. Overview counters open their corresponding filtered queue and a
-worker card shows the watcher heartbeat, current activity and drop-folder
-backlog. Jobs, Search and Audit have stable server-side pagination.
+Audit, Access. Overview counters link to their filtered queue; a worker card
+shows watcher heartbeat, activity and drop-folder backlog.
 
-Needs attention contains refused, failed and interrupted documents. An admin can
-inspect the original, retry after correcting the cause, or mark the item resolved
-with a recorded reason. A crash during an external emit is called out separately:
-retry requires acknowledging that the first delivery may have succeeded. Failed
-documents follow `retention.documents_days`, including resolved items.
-
-Document bytes identify an assessment history; each arrival has its own receipt
-record with filename, source, allowlisted metadata and outcome. A repeated file
-therefore remains visible as a business event without overwriting or duplicating
-the document's evidence.
+Needs attention holds refused, failed and interrupted documents — inspect,
+retry (individually or in bulk), or mark resolved with a reason. A crash mid
+external-delivery requires acknowledging the first attempt may have succeeded
+before retrying. Failed documents follow `retention.documents_days`.
 
 ### Roles
 
@@ -569,30 +415,18 @@ the document's evidence.
 | `jobs.reprocess.commit` | | | ✅ | |
 | `audit.read`, `audit.verify` | | | ✅ | ✅ |
 
-A document counts as quarantined if its disposition says so, if a release is
-still pending, **or** if the file physically sits under the quarantine root. One
-rule decides both whether its PDF can be opened and whether a search result
-shows its excerpt — a snippet is a raw slice of the document, so withholding the
-PDF while serving its text would make the gate decorative. A de-escalation records the new disposition immediately but
-leaves the PDF in quarantine until someone with `quarantine.release` approves
-the move — so disposition alone would open that window to Investigator, which is
-the exact thing `release_pending` exists to prevent.
-
-`dlp_admin` is the superuser role. The auditor role exists to hold the *opposite*
-split: it sees the audit trail and masked hits, but never document text, the
-original PDF, or cleartext. If you want strict separation of duties, provision a
-real auditor with only the `auditor` role and treat `dlp_admin` as a
-carefully-issued privilege.
+A document counts as quarantined if its disposition says so, a release is
+pending, **or** the file physically sits under the quarantine root — one rule
+gates both whether its PDF opens and whether a search snippet shows. `dlp_admin`
+is the superuser role; `auditor` is its opposite (audit trail and masked hits,
+never document text, the PDF, or cleartext).
 
 ### Auth
 
 - **OIDC** is the primary path. With `console.auth.oidc` configured, `/login`
-  redirects straight to the IdP. Roles come from the `roles_claim` in the ID
-  token, mapped through `role_map`, then intersected with the four known roles —
-  an IdP's own composite roles are noise, not privileges.
-- **Local accounts** are the break-glass/air-gapped fallback, reachable at
-  `/login?auth=local` even when SSO is the default. Passwords are argon2id
-  hashes in config; generate one with `dlpduck console hash-password`.
+  redirects to the IdP; roles come from `roles_claim` via `role_map`.
+- **Local accounts** are the break-glass/air-gapped fallback, at
+  `/login?auth=local`. Hash a password with `dlpduck console hash-password`.
 
 ---
 
@@ -600,7 +434,7 @@ carefully-issued privilege.
 
 | Command | What it does |
 |---|---|
-| `validate-config` | Parse config, compile every regex, check paths. Also prints warnings for settings that are legal but quietly switch off a guarantee. Use it in CI. |
+| `validate-config` | Parse config, compile every regex, check paths. Prints warnings too. Use it in CI. |
 | `run` | Start the watcher daemon. |
 | `scan <pdf>` | Dry-run one document; print lines and what would hit. Writes nothing. |
 | `test-rules <dir>` | Run the ruleset over a corpus and report per-rule hit counts. |
@@ -754,6 +588,103 @@ Only quarantined documents raise a ticket? Filter in `run()`:
         super().run(ctx)
 ```
 
+### A worked example: summarising with an LLM provider
+
+This one is a deliberate exception to rule #1 above — it ships the document's
+full text off-box, to a third-party API, on purpose. That's why it's gated
+hard: only `archive`-disposition documents (never quarantined ones, which are
+exactly the sensitive content this tool exists to keep in-house), and only
+against an LLM endpoint you've actually reviewed for this — a self-hosted
+model, or a vendor under contract — never a default. Think about that gate
+before adapting this for your own use.
+
+```python
+# mycompany/dlpduck_plugins.py
+import json
+import os
+import urllib.request
+
+from dlpduck.plugins.sinks import SpoolingSink
+from dlpduck.types import JobContext
+
+
+class LlmSummarySink(SpoolingSink):
+    """Summarises an archived document's text with an LLM provider and posts
+    the summary to an internal endpoint. Targets an OpenAI-compatible chat
+    completions API; adjust build()/deliver() for another provider's shape.
+    """
+
+    phase = "emit"
+    default_name = "llm_summary"
+
+    def __init__(
+        self,
+        api_url: str,
+        api_key_env: str,
+        model: str,
+        summary_endpoint: str,
+        max_chars: int = 20_000,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)          # name/critical/spool_root/timeout
+        self.api_url = api_url
+        self.api_key = os.environ[api_key_env]   # fail at startup, not mid-run
+        self.model = model
+        self.summary_endpoint = summary_endpoint
+        self.max_chars = max_chars
+
+    def run(self, ctx: JobContext) -> None:
+        if ctx.disposition != "archive":
+            return                          # never summarise a quarantined document
+        super().run(ctx)
+
+    def build(self, ctx: JobContext) -> dict:
+        return {"job_id": ctx.job_id, "text": ctx.text.full_text[: self.max_chars]}
+
+    def deliver(self, payload: dict) -> None:
+        summary = self._summarise(payload["text"])
+        req = urllib.request.Request(
+            self.summary_endpoint,
+            data=json.dumps({"job_id": payload["job_id"], "summary": summary}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            if resp.status >= 300:
+                raise RuntimeError(f"summary endpoint returned HTTP {resp.status}")
+
+    def _summarise(self, text: str) -> str:
+        req = urllib.request.Request(
+            self.api_url,
+            data=json.dumps({
+                "model": self.model,
+                "messages": [
+                    {"role": "system", "content": "Summarise this document in three sentences."},
+                    {"role": "user", "content": text},
+                ],
+            }).encode(),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            body = json.loads(resp.read())
+        return body["choices"][0]["message"]["content"]
+```
+
+```yaml
+plugins:
+  - path: mycompany.dlpduck_plugins.LlmSummarySink
+    args:
+      api_url: https://api.your-llm-provider.example/v1/chat/completions
+      api_key_env: DLPDUCK_LLM_API_KEY
+      model: your-provider-model-id
+      summary_endpoint: https://intranet.example/dlp-summaries
+      timeout: 30
+```
+
 ### A worked example: an enrich plugin
 
 ```python
@@ -803,12 +734,11 @@ plugins:
 
 Built-in names: `syslog`, `webhook`, `static_enrich`.
 
-`webhook` posts to exactly the URL you configure. It refuses redirects rather
-than following them: a 200 from a redirect target would otherwise read as a
-successful delivery while your SIEM received nothing and nothing spooled, and
-the signing header would travel to a host you didn't choose. A redirect is a
-delivery failure, so the event spools and `replay-sink` can retry it once the
-endpoint is fixed.
+`webhook` posts to exactly the URL you configure and refuses to follow
+redirects — a redirect target returning 200 would otherwise read as a
+successful delivery while nothing was actually received, and the signing
+header would travel to a host you didn't choose. A redirect spools as a
+delivery failure instead, retryable with `replay-sink`.
 
 Then verify before you deploy:
 
@@ -828,216 +758,6 @@ def test_ticket_sink_omits_raw_values():
 ```
 
 ---
-
-## Security notes
-
-**Threat model.** DLPDuck assumes the drop folder is writable by something less
-trusted than the daemon (an MFP's account, a share), that console users are
-authenticated but variably privileged, and that the host itself is trusted.
-
-What follows from that:
-
-- **Symlinks in the drop folder are refused**, not followed — otherwise a link
-  named `scan.pdf` would get its target's contents ingested into a searchable
-  store.
-- **`max_bytes` is enforced against what's actually read**, not just a prior
-  `stat()`, so a file that grows mid-claim can't exceed it — and a companion
-  metadata file is bounded by `max_metadata_bytes` rather than read whole.
-- **Untrusted metadata values are length-capped** before they reach the index,
-  which outlives a purge; a PDF declares its own Info dictionary, so a hostile
-  Title would otherwise be stored verbatim and rendered in the console.
-- **A corrupt audit record is reported, not fatal.** One truncated line — the
-  ordinary shape of a crash — used to make the whole trail unreadable and stop
-  the daemon restarting. Readable history still reads; `verify-audit` reports
-  the hole and never passes clean.
-- **Oversized pages are rasterised at a reduced dpi.** A PDF declares its own
-  page size, and OCR'ing a metres-wide page at 150 dpi is a decompression bomb.
-- **Job ids are validated (32 hex chars) before touching the filesystem.** They
-  are interpolated into globs to find files, so this is a boundary, not a
-  formality: `*` would otherwise turn "purge this job" into "purge everything".
-- **Rule ids are constrained** to a safe charset. Rulesets get shared and copied
-  between installs; an id ends up in audit events, logs, and console markup.
-- **Search is fully parameterised**, with the query length capped, the result
-  limit capped, and a wall-clock interrupt on the DuckDB connection.
-- **Every rule match is time-bounded** on any thread, so a pathological pattern
-  fails its document rather than pinning a core.
-- **Reveal is verified, not trusted.** The raw value is never stored, so reveal
-  re-derives it from the position the hit recorded — and then checks the result
-  reproduces the masked form that *was* stored. If the content has changed under
-  those offsets, reveal reports nothing rather than showing an unrelated slice of
-  the document beneath a legitimate-looking audit entry.
-- **The session is rotated at login**, so nothing chosen while a session was
-  anonymous (a planted cookie, an anonymous CSRF token) survives the privilege
-  boundary.
-- **Sessions are revocable.** The signed browser cookie contains an opaque token
-  that must still exist in the operational store. Logout revokes that token;
-  administrators can revoke every active session for a user from Access, and
-  local-account role or password-hash changes invalidate the old session.
-- **A password_hash that isn't one is rejected at boot**, because the usual cause
-  is a plaintext password pasted into config.
-- **Disaster recovery never declassifies.** A rebuilt row takes its disposition
-  from where the PDF is filed, not from re-running today's ruleset — otherwise a
-  ruleset change would quietly mark a quarantined document "archive" with no
-  release recorded. Disagreements are counted and reported so an operator can run
-  a proper, audited `reprocess`.
-- **The assessment history can't be silently overwritten.** Two writers racing
-  for the same sequence number is refused rather than one clobbering the other.
-- **CSRF tokens** are session-bound and required on every mutating form, compared
-  in constant time over bytes rather than characters — `secrets.compare_digest`
-  raises on a non-ASCII `str`, and the submitted token is attacker-controlled, so
-  comparing characters turned one accented byte into a 500 on the guard itself.
-- **Malformed input is refused, never a stack trace.** Every console parameter is
-  exercised against hostile values in the suite; a 5xx is treated as a bug.
-- **Purge requires typing `purge`** in a modal that also collects the reason —
-  the one action nothing else in the console can walk back.
-- **Failed logins are throttled before the password is checked**, per username
-  *and* per client address. Guessing is the obvious risk; the sharper one is
-  that argon2id is deliberately expensive and `/login` is unauthenticated, so
-  without a ceiling a flood of POSTs — no valid username needed — exhausts
-  memory and CPU. The lockout response is identical whether or not the account
-  exists, so it doesn't hand back the enumeration the equal-time hashing avoids.
-- **Who got in is audited too**, not just what they did afterwards:
-  `auth.succeeded` (with the roles granted), `auth.failed`, `auth.throttled` and
-  `auth.logout`, for the local and SSO paths alike. The attempted password is
-  never recorded — a near-miss is somebody's real password somewhere else.
-
-**The console makes no outbound requests.** Its fonts, stylesheet and images are
-all served from `/static`, and the response headers say so: a strict CSP
-(`default-src 'self'`, `frame-ancestors 'none'`, `object-src 'none'`,
-`base-uri 'none'`), plus `nosniff`, `X-Frame-Options: DENY` and
-`Referrer-Policy: no-referrer`. An air-gapped install therefore renders
-identically to a connected one, and no third party learns who is looking at a
-DLP console or when. `frame-ancestors` earns its place here specifically:
-purge is one click behind a confirmation, and clickjacking is the attack that
-turns a click meant for something else into an irreversible deletion.
-
-**Deploy behind TLS.** The console speaks plain HTTP and binds to `127.0.0.1` by
-default. Terminate TLS in front of it and set `console.session_cookie_secure:
-true` so the session cookie carries `Secure`. Sessions expire after
-`session_max_age_seconds` (default 8h) and can be revoked sooner from Access.
-
-**Filesystem permissions.** The daemon and console set the process umask from
-config (`umask`, default `"0077"` — owner-only) before writing anything, so
-archived PDFs, the content store, and the audit log aren't group- or
-world-readable by accident. Widen it to `"0027"` if a reviewer group genuinely
-needs filesystem access, or set it to `null` to inherit the invoking shell's.
-Still run the daemon as a dedicated user, and keep `quarantine/` on a separate
-mount/ACL from `archive/`.
-
-**Known limitations, stated plainly:**
-
-- Rulesets are trusted code — they are compiled regexes from your config. The
-  per-rule time budget bounds a catastrophic pattern (it is enforced by the
-  `regex` module on whatever thread the scan runs on, ingestion or console), but
-  test new patterns with `dlpduck test-rules` before deploying them anyway.
-- Audit appends are serialised with a `flock` on `work_dir/audit`. On a
-  filesystem that doesn't implement it (some NFSv3 setups), concurrent appenders
-  could still interleave — keep `work_dir` on local disk or NFSv4.
-- Reporting a vulnerability: please open a private security advisory rather than
-  a public issue.
-
----
-
-## Development
-
-CI (`.github/workflows/ci.yml`) runs the lint and the suite on every push and
-PR, validates the shipped example config so it can't drift from the schema it
-demonstrates, and — separately — builds the wheel, installs it into a clean
-environment with no dev dependencies, and runs the quick start against it. That
-last job exists because the suite runs *inside* the dev environment and so
-cannot tell a runtime dependency from a dev one, or notice an asset that lives
-beside the package rather than inside it. See [CONTRIBUTING.md](CONTRIBUTING.md).
-
-```bash
-uv sync
-uv run pytest -q                       # full suite (~6 min; OCR is the slow part)
-uv run pytest -q tests/test_engine.py  # one module
-uv run ruff check .                    # lint — clean, and expected to stay that way
-```
-
-Two test modules are worth knowing about, because they cover things line
-coverage cannot see:
-
-`scripts/mutation_test.py` checks the *tests* rather than the code: it applies
-22 hand-picked bugs to safety-critical predicates — reveal a mask tail that
-wasn't asked for, accept a broken audit link, write purged content back, grant
-every permission — and reports any the suite fails to notice. All 22 are caught.
-Run it after changing anything in that list; a survivor means a property the code
-holds by accident rather than by test.
-
-```bash
-uv run python scripts/mutation_test.py           # all of them (~20 min)
-uv run python scripts/mutation_test.py -k audit  # just the audit ones
-```
-
-- `tests/test_properties.py` — Hypothesis over the invariants the design rests
-  on: masking never reproduces a value, a hit's offsets always point at what it
-  matched, correlation is keyed and stable. These are claims about *all* inputs,
-  and the inputs are documents an organisation did not write. It earned its place
-  immediately by finding that correlation's normaliser was ASCII-only, so every
-  wholly non-Latin value shared one digest.
-- `tests/test_concurrency.py` — properties that only fail with more than one
-  writer: the audit chain under parallel appends and across real processes, and
-  the assessment-history guard under genuine contention. Both were reasoned about
-  before they were ever run in parallel.
-- `tests/test_malformed_pdfs.py` — broken, hostile and merely awkward documents.
-  A real corpus can't be synthesised, but the guarantee can: nothing unreadable
-  reaches the clean archive.
-- `tests/test_scale.py` — reads that are unbounded by nature: the audit browser,
-  a job's timeline, the job list, and the Overview's counters. Each is asserted
-  on work done (rows held, memory) rather than wall-clock, so they don't go
-  flaky on a loaded machine.
-- `tests/test_schema_evolution.py` — an index written by an older release must
-  still read. Without `union_by_name` the first added column takes out every
-  historical row, not just the old ones.
-- `tests/test_ocr_integration.py` — the path the product exists for. Every
-  other test builds PDFs that already carry a text layer, which quietly stubs
-  out the slow half of the system; these rasterise a page and run the real OCR
-  model over it, end to end into a quarantine decision.
-
-`ruff format` is deliberately *not* enforced: several comments here are prose that
-wraps where it reads best. Match the surrounding style rather than reformatting.
-
-Layout:
-
-```
-dlpduck/
-  watcher.py      drop-folder polling and stability detection
-  pipeline.py     claim → process → dispose → commit
-  extract.py      per-page native/OCR extraction, row clustering
-  engine.py       rule evaluation
-  rules.py        rule parsing/compilation
-  validators.py   luhn / iban / nhs checksums
-  masking.py      mask() and correlate()
-  index.py        metadata store writes
-  content.py      content store writes, reads, purge
-  search.py       DuckDB join across both stores
-  reprocess.py    reassessment history, release
-  reindex.py      disaster recovery
-  retention.py    partition-level deletion
-  audit.py        hash-chained JSONL
-  plugins/        base, loader, sinks, enrich, spool
-  console/        FastAPI app, auth, RBAC, CSRF, templates
-```
-
-Tests mirror that layout in `tests/`. New behaviour needs a test; security
-boundaries (job id validation, symlink refusal, RBAC, CSRF) need one that proves
-the *negative* case too.
-
----
-
-## Reporting a vulnerability
-
-Please don't open a public issue. [SECURITY.md](SECURITY.md) has the private
-reporting route, and — more usefully — states which properties count as
-vulnerabilities, which don't (config is trusted input; plugins run in-process),
-and the risks that are knowingly accepted and documented.
-
-## Contributing
-
-[CONTRIBUTING.md](CONTRIBUTING.md) covers the setup, the one principle worth
-internalising before changing anything, and which test module covers the things
-line coverage cannot see.
 
 ## Licence
 

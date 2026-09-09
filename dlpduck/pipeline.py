@@ -112,9 +112,7 @@ class Pipeline:
         self.metadata_parser = MetadataParserFactory.get_parser(
             config.source.metadata_format
         )
-        self.audit = AuditLog(
-            config.destination.work_dir / "audit", integrity=config.audit.integrity
-        )
+        self.audit = AuditLog(config.audit_dir, integrity=config.audit.integrity)
         self.index_root = config.destination.work_dir / "index"
         self.content_root = config.destination.work_dir / "content"
         self.plugins = PluginRunner(config.load_plugins(), self.audit)

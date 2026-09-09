@@ -109,11 +109,12 @@ jobs:
         run: |
           set -euo pipefail
           workdir="$(mktemp -d)"
-          mkdir -p "$workdir"/srv/{drops,archive,quarantine,work}
+          mkdir -p "$workdir"/srv/{drops,archive,quarantine,work,audit}
           chmod -R o+rwX "$workdir"
           cat > "$workdir/config.yaml" <<'YAML'
           source: {name: ci, path: /srv/drops, metadata_format: none}
           destination: {archive: /srv/archive, quarantine: /srv/quarantine, work_dir: /srv/work}
+          audit: {path: /srv/audit}
           dlp:
             rules:
               - include: builtin:default.yaml
@@ -130,7 +131,8 @@ jobs:
           cleanup() {
             docker logs dlpduck-console-ci 2>/dev/null || true
             docker logs dlpduck-watch-ci 2>/dev/null || true
-            docker rm -f dlpduck-console-ci dlpduck-watch-ci >/dev/null 2>&1 || true
+            docker logs dlpduck-both-ci 2>/dev/null || true
+            docker rm -f dlpduck-console-ci dlpduck-watch-ci dlpduck-both-ci >/dev/null 2>&1 || true
           }
           trap cleanup EXIT
 
@@ -140,6 +142,7 @@ jobs:
             -v "$workdir/config.yaml:/etc/dlpduck/config.yaml:ro" \
             -v "$workdir/srv/drops:/srv/drops" -v "$workdir/srv/archive:/srv/archive" \
             -v "$workdir/srv/quarantine:/srv/quarantine" -v "$workdir/srv/work:/srv/work" \
+            -v "$workdir/srv/audit:/srv/audit" \
             -p 8080:8080 dlpduck:ci console run --config /etc/dlpduck/config.yaml
           for _ in $(seq 1 30); do
             if curl -fsS -o /dev/null http://127.0.0.1:8080/login; then break; fi
@@ -153,6 +156,7 @@ jobs:
             -v "$workdir/config.yaml:/etc/dlpduck/config.yaml:ro" \
             -v "$workdir/srv/drops:/srv/drops" -v "$workdir/srv/archive:/srv/archive" \
             -v "$workdir/srv/quarantine:/srv/quarantine" -v "$workdir/srv/work:/srv/work" \
+            -v "$workdir/srv/audit:/srv/audit" \
             dlpduck:ci run --config /etc/dlpduck/config.yaml
           printf '%%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]>>endobj\ntrailer<</Root 1 0 R>>\n' > "$workdir/srv/drops/smoke.pdf"
           # Archived/quarantined files land under a bind mount owned by the
@@ -168,3 +172,36 @@ jobs:
           done
           docker logs dlpduck-watch-ci
           [ -n "$processed" ] || { echo "::error::watcher role did not process the dropped PDF"; exit 1; }
+          docker rm -f dlpduck-watch-ci >/dev/null 2>&1 || true
+
+          docker run -d --name dlpduck-both-ci \
+            -e DLPDUCK_HMAC_KEY=ci-only-not-a-real-key \
+            -e DLPDUCK_SESSION_SECRET=ci-only-not-a-real-secret \
+            -e DLPDUCK_RUN_BOTH=true \
+            -v "$workdir/config.yaml:/etc/dlpduck/config.yaml:ro" \
+            -v "$workdir/srv/drops:/srv/drops" -v "$workdir/srv/archive:/srv/archive" \
+            -v "$workdir/srv/quarantine:/srv/quarantine" -v "$workdir/srv/work:/srv/work" \
+            -v "$workdir/srv/audit:/srv/audit" \
+            -p 8081:8080 dlpduck:ci --config /etc/dlpduck/config.yaml
+          for _ in $(seq 1 30); do
+            if curl -fsS -o /dev/null http://127.0.0.1:8081/login; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8081/health/live
+          curl -fsS http://127.0.0.1:8081/health/ready
+          rm -f "$workdir/srv/drops/smoke.pdf"
+          printf '%%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]>>endobj\ntrailer<</Root 1 0 R>>\n' > "$workdir/srv/drops/smoke-both.pdf"
+          processed=""
+          for _ in $(seq 1 20); do
+            if docker logs dlpduck-both-ci 2>&1 | grep -qE 'job [0-9a-f]+ -> (archive|quarantine)'; then
+              processed=1
+              break
+            fi
+            sleep 1
+          done
+          docker logs dlpduck-both-ci
+          [ -n "$processed" ] || { echo "::error::both mode's watcher did not process the dropped PDF"; exit 1; }
+          # Confirm the console is still alive too — a container with a
+          # dead child process but one that's still running is exactly
+          # the half-alive state docker-entrypoint.sh is meant to prevent.
+          curl -fsS -o /dev/null http://127.0.0.1:8081/login

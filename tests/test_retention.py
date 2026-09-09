@@ -108,14 +108,16 @@ class TestPlanRetention:
 
     def test_index_and_audit_have_independent_windows(self, tmp_path):
         config = _config(tmp_path, {"index_days": 10, "audit_days": 100})
+        config.audit.path = tmp_path / "separate-audit"
         near_old = date.today() - timedelta(days=20)  # past index window, not audit's
         _touch_partition(config.destination.work_dir / "index", near_old)
-        _touch_partition(config.destination.work_dir / "audit", near_old)
+        _touch_partition(config.audit_dir, near_old)
 
         plans = plan_retention(config)
         by_store = {p.store: p for p in plans}
 
         assert len(by_store["index"].eligible) == 1
+        assert by_store["audit"].root == config.audit_dir
         assert by_store["audit"].eligible == []  # 20 days < 100-day window
 
     def test_recent_partitions_are_never_eligible(self, tmp_path):

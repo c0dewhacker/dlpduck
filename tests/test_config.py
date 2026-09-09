@@ -56,6 +56,7 @@ class TestLoadConfig:
         config = load_config(path)
         assert config.source.name == "test"
         assert config.audit.integrity == "chained"  # default
+        assert config.audit_dir == tmp_path / "work" / "audit"
 
     def test_config_dir_used_to_resolve_relative_rule_includes(self, tmp_path):
         path = _write_config(tmp_path)
@@ -76,6 +77,16 @@ class TestValidateConfig:
         path = _write_config(tmp_path)
         config = validate_config(path)
         assert config.destination.archive.is_dir()  # created by validate_config
+
+    def test_separate_audit_path_is_created(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("DLPDUCK_HMAC_KEY", "a-real-key")
+        path = _write_config(tmp_path)
+        path.write_text(path.read_text() + f"\naudit:\n  path: {tmp_path / 'separate-audit'}\n")
+
+        config = validate_config(path)
+
+        assert config.audit_dir == tmp_path / "separate-audit"
+        assert config.audit_dir.is_dir()
 
     def test_missing_source_path_fails(self, tmp_path, monkeypatch):
         monkeypatch.setenv("DLPDUCK_HMAC_KEY", "a-real-key")

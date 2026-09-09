@@ -88,7 +88,7 @@ def plan_retention(config: Config, today: date | None = None) -> list[RetentionP
         ("content", config.destination.work_dir / "content", doc_cutoff),
         ("failed", config.destination.work_dir / "failed", doc_cutoff),
         ("index", config.destination.work_dir / "index", index_cutoff),
-        ("audit", config.destination.work_dir / "audit", audit_cutoff),
+        ("audit", config.audit_dir, audit_cutoff),
     ]
     plans = []
     for store, root, cutoff in targets:
