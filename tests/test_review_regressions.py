@@ -15,7 +15,7 @@ from dlpduck.failures import FailureQueue
 from dlpduck.index import AssessmentExists
 from dlpduck.pipeline import Pipeline
 from dlpduck.reprocess import Reprocessor, latest_index_rows
-from dlpduck.types import DocumentText, TextLine
+from dlpduck.types import DocumentText, DocumentTooLarge, TextLine
 from tests.pdf_factory import blank_pdf, make_pdf
 
 
@@ -201,6 +201,42 @@ def test_uncertain_delivery_requires_confirmation_before_retry_audit(pipeline):
 
     events = pipeline.audit.events_for_job(job_id)
     assert not [event for event in events if event["event"] == "job.retry_requested"]
+
+
+def test_retrying_a_still_oversized_document_reports_failure_not_a_crash(tmp_path, monkeypatch):
+    """A claim-time refusal (oversized, here) can't be re-extracted the way
+    a parser error can — retry() re-runs claim() itself, which refuses
+    again. That must come back as the same friendly ValueError every other
+    "retried and still bad" path already raises, not an unhandled
+    DocumentTooLarge — and reject_at_claim's own fingerprint (name/size/
+    mtime, since content is exactly what a refusal declines to read) must
+    still land back in the SAME folder rather than minting a duplicate,
+    which depends on retry() preserving the original file's mtime through
+    its staging copy.
+    """
+    monkeypatch.setenv("DLPDUCK_HMAC_KEY", "review-tests-only")
+    drops = tmp_path / "drops"
+    drops.mkdir()
+    config = Config.model_validate({
+        "source": {"name": "scanner", "path": drops},
+        "limits": {"max_bytes": 1024},
+        "destination": {"archive": tmp_path / "archive", "quarantine": tmp_path / "quarantine", "work_dir": tmp_path / "work"},
+        "dlp": {"rules": [{"id": "secret", "name": "Secret", "pattern": "SECRET", "action": "quarantine"}]},
+    })
+    pipeline = Pipeline(config)
+    path = drops / "oversized.pdf"
+    path.write_bytes(b"%PDF-1.4\n" + b"0" * 2000)
+    with pytest.raises(DocumentTooLarge):
+        pipeline.run_job(path, None, config.destination.work_dir / "_processing")
+
+    queue = FailureQueue(pipeline)
+    job_id = queue.items()[0]["job_id"]
+
+    with pytest.raises(ValueError, match="The retry failed again"):
+        queue.retry("failed", job_id, "hoping the limit changed", "admin")
+
+    items = queue.items()
+    assert [item["job_id"] for item in items] == [job_id]
 
 
 @pytest.mark.parametrize("field", ["documents_days", "index_days", "audit_days"])
