@@ -417,6 +417,39 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
         request.session["queue_flash"] = message
         return RedirectResponse("/failed", status_code=303)
 
+    @app.post("/failed/bulk-retry", response_model=None)
+    def failed_bulk_retry(
+        request: Request,
+        items: list[str] = Form(default_factory=list),
+        reason: str = Form(...),
+        csrf_token: str = Form(...),
+        confirm_delivery: bool = Form(False),
+        user=Depends(require_permission("jobs.failed.manage")),
+    ):
+        verify_csrf(request, csrf_token)
+        if not items:
+            request.session["queue_flash"] = "Select at least one item to retry."
+            return RedirectResponse("/failed", status_code=303)
+
+        succeeded: list[str] = []
+        failed: list[tuple[str, str]] = []
+        for entry in items:
+            kind, _, job_id = entry.partition(":")
+            if not job_id:
+                failed.append((entry, "malformed selection"))
+                continue
+            try:
+                failures.retry(kind, job_id, reason, user.username, confirm_delivery)
+                succeeded.append(job_id)
+            except ValueError as exc:
+                failed.append((job_id, str(exc)))
+
+        message = f"Retried {len(succeeded)} of {len(items)} selected item(s)."
+        if failed:
+            message += " Not retried: " + "; ".join(f"{jid[:12]} ({err})" for jid, err in failed)
+        request.session["queue_flash"] = message
+        return RedirectResponse("/failed", status_code=303)
+
     @app.get("/", response_model=None)
     def overview(
         request: Request, user=Depends(require_permission("jobs.list"))
