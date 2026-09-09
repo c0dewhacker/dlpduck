@@ -12,7 +12,7 @@ source:
   pdf_suffix: .pdf
   metadata_format: xml             # xml | json | text | none
   metadata_suffix: .xml
-  # Allowlist; every other key is dropped (§6.4) — from BOTH the companion
+  # Allowlist; every other key is dropped from BOTH the companion
   # file and the PDF's own Info dictionary (pdf_title, pdf_author,
   # pdf_subject, pdf_creator, pdf_producer, pdf_created_at,
   # pdf_modified_at), which is extracted unconditionally so a bare PDF
@@ -23,7 +23,7 @@ source:
     [device_id, user_id, job_type, submitted_at, page_count]
   poll_seconds: 5
   stability_polls: 2               # size must hold across N polls before claim
-  # A companion file is a convenience, never a requirement (§2) — a bare
+  # A companion file is a convenience, never a requirement — a bare
   # PDF dropped with nothing alongside it is still processed, after this
   # many EXTRA stable-size polls waiting for a companion that might
   # genuinely be en route. 0 = claim immediately, no waiting at all.
@@ -40,7 +40,7 @@ limits:
 
 extraction:
   dpi: 150
-  native_min_chars: 20             # per page (§5.1)
+  native_min_chars: 20             # per page
   # Extraction runs in a disposable child process, so a parser or OCR
   # model that wedges on a hostile PDF cannot stall ingestion forever —
   # the child is killed at the timeout and the job fails closed. Set
@@ -50,7 +50,7 @@ extraction:
   isolate_worker: true
 
 dlp:
-  quarantine_on_degraded: true     # fail closed (§3.2)
+  quarantine_on_degraded: true     # fail closed
   hmac_key_env: DLPDUCK_HMAC_KEY   # key never appears in config
   rules:
     - include: builtin:default.yaml
@@ -100,7 +100,7 @@ console:
     # botnet grind one.
     max_failed_logins: 10
     lockout_seconds: 300
-    # OIDC is the primary path (§10.4) — an external IdP authenticates
+    # OIDC is the primary path — an external IdP authenticates
     # the person, roles come from an ID token claim. Configure this,
     # `users` below, both, or neither (an install with neither still
     # starts, it just has no way to log in — add at least one).
@@ -121,7 +121,7 @@ console:
         password_hash: "$argon2id$v=19$..."
         role: dlp_admin
 
-# Emit-phase plugins forward a job's outcome to a SIEM (§9) — best
+# Emit-phase plugins forward a job's outcome to a SIEM — best
 # effort, spooled and retried on failure, never blocking the pipeline.
 # The audit trail itself (JSONL, hash-chained) is not a plugin; it's
 # built into every commit and always on. Uncomment to enable a sink:

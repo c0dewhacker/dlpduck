@@ -97,7 +97,7 @@ class TestTheReadmeStaysCurrent:
         assert not missing, f"audit events the README never mentions: {missing}"
 
     @pytest.mark.parametrize(
-        "path", ["docs/DESIGN.md", "SECURITY.md", "CONTRIBUTING.md", "LICENSE"]
+        "path", ["SECURITY.md", "CONTRIBUTING.md", "LICENSE"]
     )
     def test_the_documents_the_readme_links_to_exist(self, path):
         assert (REPO / path).is_file()

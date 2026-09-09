@@ -10,7 +10,7 @@ projects: a subtle wrong answer is worse than an obvious crash.
 uv sync
 export DLPDUCK_HMAC_KEY="$(openssl rand -hex 32)"
 export DLPDUCK_SESSION_SECRET="$(openssl rand -hex 32)"
-uv run pytest -q                    # ~6 minutes; the OCR tests are the slow part
+uv run pytest -q -n 2 --dist=loadscope
 uv run python scripts/mutation_test.py   # does the suite actually catch a bug? (~20 min)
 uv run ruff check .
 uv run mypy dlpduck/
@@ -37,14 +37,6 @@ annotations that are actually wrong — it caught a handler declared
 `-> HTMLResponse` that returned a redirect. If you find yourself adding a
 `type: ignore`, prefer fixing the type; there are only two in the codebase and
 both are third-party stub gaps with a comment saying so.
-
-## Where the reasoning lives
-
-Comments cite the design document by section (`§8.4`, `§6.4`) instead of
-restating the argument at every call site — [docs/DESIGN.md](docs/DESIGN.md).
-If you add a citation, add the section; `tests/test_design_references.py` fails
-on a reference with nowhere to land, because 126 links to a document nobody can
-open would be worse than none.
 
 ## The one principle
 
@@ -109,6 +101,5 @@ lists what counts, what doesn't, and the risks that are accepted and documented.
 comments here are prose that wraps where it reads best. Match the surrounding
 code.
 
-Comments should explain *why*, especially where the obvious approach was
-rejected — most of the non-obvious code here exists because a plausible
-alternative was tried and turned out to be wrong.
+Comments should explain why a non-obvious safety or compatibility constraint
+exists, especially when changing it could alter stored data or routing behavior.

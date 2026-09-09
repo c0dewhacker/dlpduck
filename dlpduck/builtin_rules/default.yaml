@@ -1,6 +1,6 @@
 # Baseline ruleset. Don't edit in place — `include:` this file from your own
 # and redefine by id. Anything you redefine wins; everything else keeps
-# tracking upstream on update. See the design doc §7 for rule anatomy and
+# tracking upstream on update. See the README for rule anatomy and
 # guidance on writing rules that survive contact with production.
 rules:
 

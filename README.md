@@ -46,10 +46,6 @@ documents under new rules, approve releases, and purge retained content.
 > but production deployments should pin a revision and follow the
 > [security guidance](SECURITY.md).
 
-The architectural reasoning lives in **[docs/DESIGN.md](docs/DESIGN.md)**. Code
-comments that cite a `§` point there. The design also records earlier mistakes
-and why the current recovery, storage, and authorization boundaries exist.
-
 ---
 
 ## Table of contents
