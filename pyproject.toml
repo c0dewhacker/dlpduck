@@ -19,7 +19,7 @@ dependencies = [
   "python-multipart>=0.0.32",
   "itsdangerous>=2.2.0",
   "argon2-cffi>=25.1.0",
-  "uvicorn[standard]>=0.52.4",
+  "uvicorn>=0.52.4",
   "authlib>=1.8.0",
   # authlib.integrations.starlette_client imports httpx unconditionally, so
   # the console cannot start without it. It was previously dev-only, which
@@ -52,6 +52,11 @@ dev = [
   "pytest-xdist>=3.8.0",
   "reportlab>=5.0.1",
   "ruff>=0.16.6",
+]
+docker = [
+  # RapidOCR imports cv2 but does not use OpenCV's desktop UI. The Docker
+  # build substitutes this wheel for its full opencv-python dependency.
+  "opencv-python-headless==5.0.0.93",
 ]
 
 [tool.pytest.ini_options]

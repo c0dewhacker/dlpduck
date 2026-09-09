@@ -5,8 +5,7 @@
 FROM python:3.12-slim AS builder
 COPY --from=ghcr.io/astral-sh/uv:0.8.22 /uv /uvx /bin/
 
-ENV UV_COMPILE_BYTECODE=1 \
-    UV_LINK_MODE=copy \
+ENV UV_LINK_MODE=copy \
     UV_PYTHON_DOWNLOADS=never \
     UV_PROJECT_ENVIRONMENT=/app/.venv
 
@@ -15,29 +14,22 @@ WORKDIR /app
 # Dependencies first, keyed only on the lockfile, so an edit to dlpduck/
 # doesn't invalidate this layer.
 COPY pyproject.toml uv.lock ./
-RUN uv sync --locked --no-install-project --no-dev --no-editable
+RUN uv sync --locked --no-install-project --no-dev --group docker --no-editable
 
 # Now the project itself. README/LICENSE are required — pyproject.toml
 # declares them as build metadata (readme, license-files) and hatchling
 # fails the build without them.
 COPY dlpduck ./dlpduck
 COPY README.md LICENSE ./
-RUN uv sync --locked --no-dev --no-editable
+# RapidOCR declares desktop OpenCV even though DLPDuck has no GUI. Replace it
+# with the API-compatible headless wheel already fetched from the lockfile.
+RUN uv sync --locked --no-dev --group docker --no-editable && \
+    uv pip uninstall --python /app/.venv/bin/python opencv-python && \
+    uv pip install --python /app/.venv/bin/python --reinstall --no-deps \
+      opencv-python-headless==5.0.0.93
 
 # ─── Stage 2: runtime ──────────────────────────────────────────────────────
 FROM python:3.12-slim AS runtime
-
-# rapidocr-onnxruntime (the OCR fallback path) depends on full opencv-python,
-# not the headless variant, so its native module wants GUI-linked shared
-# libraries even though nothing here ever opens a window. Without these,
-# `import cv2` fails at startup with "libGL.so.1: cannot open shared object
-# file" — every dlpduck invocation, not just OCR ones, since extract.py
-# imports rapidocr_onnxruntime eagerly.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      libgl1 \
-      libglib2.0-0 \
-      libxcb1 \
-    && rm -rf /var/lib/apt/lists/*
 
 # Everything dlpduck touches — archived/quarantined PDFs, the content
 # store, the audit log — is sensitive (see config.example.yaml's `umask`).
