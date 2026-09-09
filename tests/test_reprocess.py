@@ -1,4 +1,4 @@
-"""§8.4: reprocessing is append-only (a new assessment, never a rewrite),
+"""Reprocessing appends a new assessment without rewriting history,
 escalation is automatic, de-escalation is flagged for human release, and
 a document whose original extraction was degraded stays quarantined
 regardless of what the new ruleset finds — reprocessing "rules" mode
@@ -822,7 +822,7 @@ class TestExtractMode:
 
 
 class TestAssessmentHistoryIsNotClobbered:
-    """The assessment history is append-only (§8.4), but the sequence
+    """The assessment history is append-only, but the sequence
     number is chosen by reading the current highest and adding one. Two
     writers racing — the console and the CLI, or two operators clicking
     commit — both pick the same number, and a plain write silently

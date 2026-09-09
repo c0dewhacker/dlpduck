@@ -1,14 +1,12 @@
 """Role-based access control. Four roles, built on one idea: seeing THAT
 something happened is a different privilege from seeing WHAT it
-contained, and both differ from CHANGING what the system does. See the
-design doc §10.8.
+contained, and both differ from CHANGING what the system does.
 
 DLP Admin holds every permission by default — it's the superuser role.
 This is a deliberate reversal of this module's earlier design, which
 withheld audit.read/audit.verify from DLP Admin specifically so no single
 account could both act and erase the evidence of acting (a real
-separation-of-duties property, and the one the original design doc's own
-§10.8 table specified). That property is valuable for a deployment that
+separation-of-duties property). That property is valuable for a deployment that
 wants it, but it isn't the right default for a small install where the
 admin account IS the one person operating the whole thing and being
 locked out of the audit trail on their own system is just friction. A

@@ -1,7 +1,7 @@
 """Checksum validators. Turn a pattern that matches any digit-run into one
 that actually recognises the identifier it claims to.
 
-Register your own with the @validator decorator — see the design doc §7.2.
+Register custom validators with the @validator decorator.
 """
 
 from __future__ import annotations

@@ -1,6 +1,6 @@
 /* IBM Plex, self-hosted. The console must render identically on a
    machine with no route to the internet — an air-gapped install is a
-   supported deployment (DESIGN.md §10.4), and a DLP console fetching
+   supported deployment, and a DLP console fetching
    its fonts from a third party would also tell that party, on every
    page view, that someone is using it and when.
    Latin and latin-ext subsets only; IBM Plex is SIL OFL 1.1, see

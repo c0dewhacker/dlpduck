@@ -1,4 +1,4 @@
-"""§12: rebuilding the index after losing it. The common case (content
+"""Rebuilding the index after losing it. The common case (content
 survives) never re-runs OCR; only a job whose content was ALSO lost falls
 back to re-extracting from the archived PDF. Already-indexed jobs are
 left alone — reindex only fills gaps, never overwrites.

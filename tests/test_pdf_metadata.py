@@ -1,4 +1,4 @@
-"""§6.4: metadata is extracted from the PDF itself unconditionally, so a
+"""Metadata is extracted from the PDF itself unconditionally, so a
 bare PDF with no companion still yields something — but it's exactly as
 subject to the allowlist as companion metadata is (tested at the pipeline
 level in test_pipeline.py), and filename parsing is deliberately not

@@ -88,7 +88,7 @@ def write_content_row(content_root: Path, ctx: JobContext) -> Path:
 
 def read_document_text(content_root: Path, job_id: str) -> DocumentText | None:
     """Reconstruct a DocumentText from the content store — everything the
-    DLP engine needs to re-run rules (§8.4's "rules" reprocessing mode),
+    DLP engine needs to re-run rules without reopening the PDF,
     without re-opening the PDF. Returns None if the job's content was
     purged, or never existed.
 

@@ -1,11 +1,11 @@
 """Metadata the PDF itself carries — its Info dictionary (title, author,
 creator, producer, creation/mod dates). Extracted unconditionally, so a
-bare PDF with no companion XML/JSON dropped alongside it (§2) still has
+bare PDF with no companion XML/JSON dropped alongside it still has
 *something* rather than an empty metadata dict.
 
 A companion file's values always win on overlapping keys — see
 Pipeline.claim(). And this is still subject to the same allowlist as
-companion metadata (§6.4): nothing here is kept unless
+companion metadata: nothing here is kept unless
 `source.metadata_fields` names it. A PDF's declared Title or Producer can
 leak exactly as much as a filename can (a "Divorce filing — Jane Doe"
 title saved from a word processor, say), so it gets no special exemption
@@ -14,8 +14,7 @@ from the opt-in rule.
 Deliberately not built: parsing the dropped *filename* for structure. A
 filename is whatever the sender happened to call the file, not something
 the document itself asserts — a materially weaker signal than its own
-declared metadata, and the source of the "quiet leak" §6.4 already warns
-about. Considered and left out.
+declared metadata, and a potential source of quiet data leaks.
 """
 
 from __future__ import annotations

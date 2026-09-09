@@ -1,4 +1,4 @@
-"""§10.8: seeing THAT something happened is a different privilege from
+"""Seeing THAT something happened is a different privilege from
 seeing WHAT it contained, and both differ from CHANGING what the system
 does. The gaps in the matrix are deliberate separation of duties.
 """

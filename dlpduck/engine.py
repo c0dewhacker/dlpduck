@@ -1,6 +1,6 @@
 """The DLP engine: run every rule against every line (or, for document-scope
 rules, the joined text), collect every match, and mask before anything is
-stored. See the design doc §6.
+stored.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ class _Budget:
 
     This used to be SIGALRM, which CPython only permits from the main
     thread — so it silently did nothing for the console, which runs sync
-    route handlers (including reprocess, §8.4) in a worker thread, leaving
+    route handlers, including reprocessing, in a worker thread, leaving
     exactly the path that re-scans stored text with no guard at all. The
     `regex` module takes a `timeout` on each call and enforces it itself,
     on any thread, so the guard now holds everywhere.
@@ -71,7 +71,7 @@ class DLPEngine:
             if not rule.in_range(line):
                 continue
             # finditer + group(0): capture groups no longer corrupt the
-            # match the way v1's findall()-based extraction did (§6.1).
+            # match the way v1's findall()-based extraction did.
             for m in rule.regex.finditer(line.text, timeout=budget.remaining()):
                 raw = m.group(0)
                 if not rule.validator(raw):

@@ -202,7 +202,7 @@ class TestOversizedPagesAreClamped:
 
 
 class TestRowClusteringEdges:
-    """§5.2's row clustering is what makes a form's label and its value
+    """Row clustering makes a form's label and its value
     land on the same line, so a rule spanning the pair can match. The
     happy paths are covered above; these are the shapes real OCR output
     actually takes.

@@ -1,6 +1,6 @@
 """Validated startup configuration. Every regex is compiled and every path
 is checked before the watcher starts — a bad rule fails the process at
-boot, not on document 4,000. See the design doc §11.
+boot, not on document 4,000.
 """
 
 from __future__ import annotations
@@ -21,12 +21,12 @@ class SourceConfig(BaseModel):
     pdf_suffix: str = ".pdf"
     metadata_format: Literal["xml", "json", "text", "none"] = "none"
     metadata_suffix: str = ".xml"
-    metadata_fields: list[str] = Field(default_factory=list)  # allowlist — §6.4
+    metadata_fields: list[str] = Field(default_factory=list)  # allowlist only
     poll_seconds: float = Field(default=5.0, gt=0)
     stability_polls: int = Field(default=2, ge=1)  # size must hold across N polls before claim
     # Even with a metadata_format configured, a companion file is a
     # convenience, not a requirement — a bare PDF dropped with no XML/JSON
-    # alongside it must still get processed (§2), not wait forever. This
+    # alongside it must still get processed, not wait forever. This
     # many EXTRA stable-size polls are given to let a companion that's
     # genuinely en route catch up before claiming without one.
     metadata_grace_polls: int = Field(default=3, ge=0)
@@ -47,23 +47,23 @@ class ExtractionConfig(BaseModel):
     dpi: int = Field(default=150, ge=36, le=600)
     timeout_seconds: float = Field(default=120, gt=0)
     isolate_worker: bool = True
-    native_min_chars: int = Field(default=20, ge=0)  # per page — §5.1
+    native_min_chars: int = Field(default=20, ge=0)  # evaluated per page
 
 
 class DlpConfig(BaseModel):
-    quarantine_on_degraded: bool = True  # fail closed — §3.2
+    quarantine_on_degraded: bool = True  # fail closed
     hmac_key_env: str = "DLPDUCK_HMAC_KEY"
     rules: list[dict] = Field(default_factory=list)
 
 
 class DestinationConfig(BaseModel):
     archive: Path
-    quarantine: Path  # a SEPARATE mount/ACL from `archive` in production — §8
+    quarantine: Path  # use a separate mount/ACL from `archive` in production
     work_dir: Path
 
 
 class AuditConfig(BaseModel):
-    integrity: Literal["chained", "none"] = "chained"  # §8.2
+    integrity: Literal["chained", "none"] = "chained"
 
 
 class ConsoleUserConfig(BaseModel):
@@ -115,7 +115,7 @@ class OidcConfig(BaseModel):
 
 
 class ConsoleAuthConfig(BaseModel):
-    # Both may be configured at once — OIDC as the primary path (§10.4),
+    # Both may be configured at once — OIDC as the primary path,
     # local accounts as the fallback for when the IdP is unreachable, an
     # air-gapped install, or a break-glass admin account. Neither is
     # required; an install with just `users` behaves exactly as before.
@@ -148,7 +148,7 @@ class ConsoleConfig(BaseModel):
     # come up on http://127.0.0.1 for local/dev use; ANY deployment reached
     # over a network should set this true and terminate TLS in front.
     session_cookie_secure: bool = False
-    # How a search is recorded in the audit trail (§10.6).
+    # How a search is recorded in the audit trail.
     #
     # "hashed" (default) logs only a keyed digest. The audit trail is hash-chained
     # and has no purge path by design, so anything written there is
@@ -209,7 +209,7 @@ class ConsoleConfig(BaseModel):
 
 class RetentionConfig(BaseModel):
     # None means "keep forever" — retention is opt-in per store, not a
-    # surprise default that starts silently deleting data (§8.3).
+    # surprise default that starts silently deleting data.
     documents_days: int | None = Field(default=None, ge=0)  # PDFs (archive + quarantine) + the content store
     index_days: int | None = Field(default=None, ge=0)
     audit_days: int | None = Field(default=None, ge=0)
@@ -241,7 +241,7 @@ class Config(BaseModel):
     audit: AuditConfig = Field(default_factory=AuditConfig)
     retention: RetentionConfig = Field(default_factory=RetentionConfig)
     console: ConsoleConfig = Field(default_factory=ConsoleConfig)
-    plugins: list[dict] = Field(default_factory=list)  # enrich/emit — §9
+    plugins: list[dict] = Field(default_factory=list)  # enrich and emit phases
 
     _config_dir: Path = Path(".")
 
@@ -279,7 +279,7 @@ class Config(BaseModel):
             raise ConfigError(
                 f"environment variable {self.dlp.hmac_key_env} is not set — "
                 "the DLP engine needs an HMAC key to correlate matches without "
-                "storing them (see design doc §6.4)"
+                "storing them"
             )
         return raw.encode("utf-8")
 
@@ -368,7 +368,7 @@ def config_warnings(config: Config) -> list[str]:
     ):
         # The audit trail is the only record of what was purged, and
         # `dlpduck reindex` reads it to avoid re-extracting erased content
-        # back out of a surviving PDF (§12). Age the trail out first and a
+        # back out of a surviving PDF. Age the trail out first and a
         # later rebuild has no way to know the erasure ever happened.
         warnings.append(
             f"retention.audit_days ({r.audit_days}) is shorter than "

@@ -61,7 +61,7 @@ def _doc(lines: list[str]) -> DocumentText:
 
 
 class TestMaskingNeverLeaks:
-    """§6.4. The single property the whole system is built to hold."""
+    """Verify masking never exposes the original value."""
 
     @given(raw=TEXT, keep=st.integers(min_value=-5, max_value=50))
     def test_the_mask_never_contains_the_whole_value(self, raw, keep):
@@ -109,7 +109,7 @@ class TestMaskingNeverLeaks:
 
 
 class TestCorrelationIsKeyedAndStable:
-    """§6.4. Correlation must answer "the same value appeared elsewhere"
+    """Correlation must answer "the same value appeared elsewhere"
     without anything storing the value."""
 
     @given(raw=TEXT, key=KEYS)

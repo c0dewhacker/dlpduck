@@ -1,5 +1,5 @@
 """Retention: drop dated store partitions and failed-job directories past
-a configured window. See the design doc §8.3 — deletion is directory-level
+a configured window. Deletion is directory-level
 and dry-run by default so a bad config cannot silently remove data.
 
 Every store carries its own window and its own config field

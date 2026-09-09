@@ -1,4 +1,4 @@
-"""Claim -> process -> commit -> release. See the design doc §3 for why
+"""Claim -> process -> commit -> release. Each boundary is durable so
 this ordering is load-bearing: each step is safe to repeat, and a crash
 between any two steps leaves a state the startup sweep can resolve.
 """
@@ -124,7 +124,7 @@ class Pipeline:
         """Safely read and claim a source pair into a job-scoped staging
         directory, then build its initial JobContext. Raises
         DocumentTooLarge / IOError before a complete file is accepted if
-        limits are exceeded (§3.2).
+        limits are exceeded.
         """
         # A drop folder is usually writable by something less trusted than
         # this daemon (an MFP's account, a share). A symlink there would
@@ -171,7 +171,7 @@ class Pipeline:
             self.config.source.name,
         )
 
-        # The PDF's own Info dictionary first (§2/§6.4) — a companion
+        # Read the PDF's own Info dictionary first; a companion
         # file, when one exists, wins on any key they both set.
         raw_metadata: dict = extract_pdf_metadata(pdf_bytes)
         if metadata_path is not None and metadata_path.is_symlink():
@@ -322,8 +322,8 @@ class Pipeline:
     @serialized
     def commit(self, ctx: JobContext) -> Path:
         """1) copy the PDF, 2) append+fsync the audit event, 3) write the
-        index row, 4) release staging. Each step is idempotent to replay
-        (§3.1) — job_id is content-derived, so re-running this on the same
+        index row, 4) release staging. Each step is idempotent: job_id is
+        content-derived, so re-running this on the same
         input is a no-op once the index row exists.
         """
         # A job only reaches commit after process() extracted successfully;
@@ -415,7 +415,7 @@ class Pipeline:
     @serialized
     def commit_failed(self, ctx: JobContext) -> Path:
         """Route an unprocessable job to failed/ for operator attention
-        rather than losing it or pretending it succeeded (§3.2)."""
+        rather than losing it or pretending it succeeded."""
         manifest = self._manifest(ctx)
         self._snapshot_assessment(ctx, manifest)
         failed_root = self.config.destination.work_dir / "failed" / ctx.job_id
@@ -445,7 +445,7 @@ class Pipeline:
         return dest
 
     def reject_at_claim(self, pdf_path: Path, reason: str, detail: str) -> Path:
-        """Route a file that could not even be claimed to failed/ (§3.2).
+        """Route a file that could not be claimed to the failed directory.
 
         `claim()` refuses some files before a JobContext exists: one over
         `limits.max_bytes`, or a symlink that would lead out of the drop
@@ -674,7 +674,7 @@ class Pipeline:
     @serialized
     def resume_staged(self, staging_root: Path, job_id: str | None = None) -> list[JobContext]:
         """Re-claim any job left in `_processing/` by a process that died
-        between claim and commit (§3). job_id is content-derived, so
+        between claim and commit. job_id is content-derived, so
         re-running is idempotent — it produces the same identity and the
         same verdict, not a duplicate.
         """

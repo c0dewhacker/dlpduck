@@ -1,5 +1,5 @@
 """Config is validated eagerly — a bad rule or an unset HMAC key must fail
-the process at boot, not on document 4,000. See §11.
+the process at boot, not on document 4,000.
 """
 
 from pathlib import Path
@@ -133,7 +133,7 @@ destination:
 
     def test_metadata_allowlist_defaults_to_empty(self, tmp_path, monkeypatch):
         # No fields configured -> everything the printer sends is dropped,
-        # not silently kept. This is the §6.4 default.
+        # not silently kept. This is the safe default.
         monkeypatch.setenv("DLPDUCK_HMAC_KEY", "a-real-key")
         path = _write_config(tmp_path)
         config = validate_config(path)

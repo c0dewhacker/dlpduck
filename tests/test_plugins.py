@@ -1,4 +1,4 @@
-"""§9: one plugin protocol, two phases. A non-critical failure is logged
+"""One plugin protocol supports two phases. A non-critical failure is logged
 and swallowed; a critical one stops the job. Sinks spool on delivery
 failure so a down endpoint never blocks the pipeline.
 """

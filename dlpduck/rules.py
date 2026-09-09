@@ -1,5 +1,5 @@
 """Rule definitions and the loader that turns config into compiled Rule
-objects. See the design doc §6-7 for the model this implements.
+objects.
 """
 
 from __future__ import annotations
@@ -55,7 +55,7 @@ class Rule:
         try:
             # `regex`, not `re`: a superset of the same syntax, and the
             # only one that can enforce a match timeout on any thread
-            # (see engine._Budget). No implicit flags — see §6.1.
+            # (see engine._Budget). No implicit flags.
             self.regex = regex.compile(pattern)
         except regex.error as exc:
             raise RuleConfigError(f"rule {self.id!r} has an invalid pattern: {exc}") from None
@@ -94,7 +94,7 @@ class Rule:
             raise RuleConfigError(f"rule {self.id!r}: {exc}") from None
         self.validator_name = validator_name if validator_name != "none" else None
 
-        self.mask_keep: int = int(cfg.get("mask_keep", 0))  # opt in, never out — see §6.4
+        self.mask_keep: int = int(cfg.get("mask_keep", 0))  # masking is opt in
 
         ctx = cfg.get("requires_context")
         if ctx:
@@ -172,7 +172,7 @@ def builtin_rulesets() -> list[str]:
 
 def load_ruleset(entries: list[dict[str, Any]], base_dir: Path) -> list[Rule]:
     """Flatten `include:` directives and apply by-id overrides, last write wins,
-    preserving first-seen order. See the design doc §7 — "include this file
+    preserving first-seen order: "include this file
     from your own and redefine by id".
     """
     collected: dict[str, dict[str, Any]] = {}
@@ -213,7 +213,7 @@ def ruleset_version(rules: list[Rule]) -> str:
     with the same effective rules (same ids, patterns, scopes, actions —
     disabled rules already excluded) get the same version regardless of
     process or file ordering; any real change gets a different one. Used
-    to stamp every assessment (§8.4) with what produced it, and to decide
+    to stamp every assessment with what produced it, and to decide
     whether reprocessing a job actually changes anything worth writing.
     """
     fingerprint = sorted(

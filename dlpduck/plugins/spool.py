@@ -1,6 +1,6 @@
 """On-disk spool for a sink's undelivered events. A sink's `run()` writes
 here on delivery failure so a down SIEM endpoint never blocks the pipeline
-(§9.1) — `replay-sink` drains it later.
+— `replay-sink` drains it later.
 """
 
 from __future__ import annotations

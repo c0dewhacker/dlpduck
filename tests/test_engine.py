@@ -190,7 +190,7 @@ class TestRuleBudget:
     """The budget guards against catastrophic backtracking. It used to be
     SIGALRM, which CPython only allows on the main thread — so it silently
     did nothing for the console, whose sync route handlers (reprocess,
-    §8.4) run in a worker thread. It is now enforced by the regex module
+    reprocessing) run in a worker thread. It is now enforced by the regex module
     itself, on whatever thread the scan happens on.
     """
 

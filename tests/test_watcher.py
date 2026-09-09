@@ -1,6 +1,6 @@
 """discover_ready() is the fix for MFPs writing non-atomically: a naive
 create-event watch reads half-written PDFs, so a candidate must hold a
-stable size across N consecutive polls before it's claimed. See §2.
+stable size across N consecutive polls before it's claimed.
 """
 
 from pathlib import Path
@@ -115,7 +115,7 @@ class TestStabilityGate:
         self, tmp_path, monkeypatch
     ):
         # The common "someone just drops a PDF, no XML/JSON ever comes"
-        # case (§2) — a companion is a convenience, never a requirement,
+        # case — a companion is a convenience, never a requirement,
         # even with metadata_format configured.
         monkeypatch.setenv("DLPDUCK_HMAC_KEY", "test-key-not-for-production")
         src = tmp_path / "drops"

@@ -42,7 +42,7 @@ def write_atomically(path: Path, content: str, *, encoding: str = "utf-8") -> No
         # rewrite cannot quietly widen or narrow access to it. With no
         # target yet, 0600 is the right answer anyway — everything written
         # through here is document or audit data, and the configured umask
-        # default (§2) is no wider.
+        # default is no wider.
         if path.exists():
             os.chmod(tmp, path.stat().st_mode & 0o7777)
         os.replace(tmp, path)
@@ -75,7 +75,7 @@ def atomic_write(path: Path, *, exclusive: bool = False) -> Iterator[Path]:
     for every job, until an operator finds the file and deletes it.
 
     `exclusive=True` additionally refuses to replace an existing target,
-    for the append-only assessment history (§8.4) where clobbering a row
+    for the append-only assessment history, where clobbering a row
     another writer just created would lose an assessment the audit trail
     already recorded. It uses `os.link`, which fails if the name is taken
     and is atomic — doing this with O_EXCL on the real path instead would

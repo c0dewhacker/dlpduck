@@ -1,8 +1,7 @@
-"""The admin console — §10 of the design doc. OIDC (§10.4's primary path)
-and local accounts (the air-gapped/break-glass fallback) for auth, RBAC
-(§10.5), the Overview, Jobs, job detail, Search, Rules, Audit trail and
-Access screens, and three actions on a job: reveal a hit's cleartext,
-release a pending de-escalation, and purge its content.
+"""DLPDuck's RBAC-protected admin console.
+
+OIDC is the primary authentication path; local accounts provide an
+air-gapped and break-glass fallback.
 """
 
 from __future__ import annotations
@@ -54,7 +53,7 @@ JOBS_PAGE_SIZE = 100
 def _rederive_hit_value(doc, hit: dict[str, Any], rules) -> str | None:
     """Recover a hit's cleartext from the content store.
 
-    The raw value is never stored (§6.4), so reveal re-derives it from the
+    The raw value is never stored, so reveal re-derives it from the
     position the hit recorded. `start`/`end` are relative to the hit's own
     line, and the slice runs from that line's offset through `full_text`
     rather than through the line alone — a document-scope match can span a
@@ -238,7 +237,7 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
         open an archived PDF but not a quarantined one.
 
         `disposition` alone is not enough to decide that. A de-escalation
-        (§8.4) records the NEW disposition immediately but deliberately
+        records the new disposition immediately but deliberately
         leaves the PDF in quarantine until a human with quarantine.release
         approves the move — so between those two events the row says
         "archive" while the document is still, physically and by policy,
@@ -276,13 +275,13 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
         pdf_permission_needed = _pdf_permission_for(job)
         can_view_pdf = has_permission(roles, pdf_permission_needed)
         audit_events = pipeline.audit.events_for_job(job_id) if can_see_audit else []
-        # Purge never touches the index row (§8.5 — it's the one thing
-        # proving the job happened), so "was this purged" isn't a stored
+        # Purge never touches the index row because it proves the job
+        # happened, so "was this purged" isn't a stored
         # field anywhere; it's derived the same way the PDF route already
         # decides whether it has a file to serve.
         content_purged = not has_content(pipeline.content_root, job_id)
         document_purged = not Path(job["archive_path"]).is_file()
-        # Missing files say WHAT is gone, not WHY: retention (§8.3) deletes
+        # Missing files say WHAT is gone, not WHY: retention deletes
         # whole partitions and would otherwise be reported as a purge that
         # nobody performed. The audit trail is the only thing that knows,
         # and it's already in memory for anyone who can read it — so the
@@ -451,7 +450,7 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
     ) -> HTMLResponse | RedirectResponse:
         # With an IdP configured, SSO is THE way in: don't make everyone
         # pick it off a menu every time, just go. `?auth=local` is the
-        # documented escape hatch to the break-glass form (§10.4), and a
+        # documented escape hatch to the break-glass form, and a
         # fresh logout stops here too — otherwise signing out would bounce
         # straight back through a still-live IdP session and silently sign
         # the user back in, which isn't a logout at all.
@@ -717,10 +716,10 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
         hit = job["hits"][hit_index]
 
         # The content store's `lines` are the one place raw (unmasked)
-        # text lives (§8.4's structured lines, added for reprocessing) —
+        # text lives, stored as structured lines for reprocessing —
         # reveal re-derives the value from the hit's own recorded
         # position rather than from any value stored at scan time, since
-        # none is: DLPHit never carries the raw match (§6.4).
+        # none is: DLPHit never carries the raw match.
         doc = read_document_text(pipeline.content_root, job_id)
         raw_value = _rederive_hit_value(doc, hit, pipeline.engine.rules)
 
@@ -763,7 +762,7 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
         user=Depends(require_permission("jobs.purge")),
     ) -> HTMLResponse:
         # One form, in a modal — reason, hard-delete, and the typed
-        # "purge" confirmation are all gathered together (§10.8: purge is
+        # "purge" confirmation are all gathered together because purge is
         # the one action nothing else in the console can walk back), but
         # the server still enforces confirm_text itself rather than
         # trusting the modal's own gating, since nothing stops a request

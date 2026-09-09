@@ -75,7 +75,7 @@ class TestChainedIntegrity:
     def test_events_never_carry_a_raw_matched_value(self, tmp_path):
         # This is a structural guard, not a content check: the AuditLog
         # itself has no field for cleartext, so a hit passed in must
-        # already have been masked upstream (§6.4) — this test asserts
+        # already have been masked upstream — this test asserts
         # append() doesn't add anything beyond what's given.
         log = AuditLog(tmp_path, integrity="chained")
         event = log.append("job.completed", job_id="a", masked_text="••••1234")
@@ -83,7 +83,7 @@ class TestChainedIntegrity:
 
 
 class TestTrimCheckpoint:
-    """Retention (§8.3) deletes whole old dt= partitions. Naively doing
+    """Retention deletes whole old dt= partitions. Naively doing
     that leaves the earliest surviving event's `prev` pointing at a hash
     nothing on disk can reproduce — verify() must not report that as
     tampering when a checkpoint explains it.
@@ -412,7 +412,7 @@ class TestPartitionDatesAreUTC:
 
 
 class TestRedaction:
-    """§8.5: append-only and "please erase this" eventually collide.
+    """Append-only logs and erasure requests eventually collide.
     Something sensitive does land in the trail — a search term, a filename
     inside a parse error — and the only options used to be keep it forever
     or drop a whole partition.

@@ -1,4 +1,4 @@
-"""§10.6/§8.5: v1 interpolated the query and severity straight into SQL —
+"""V1 interpolated the query and severity straight into SQL —
 injection in both, plus an unvalidated user-supplied regex as a ReDoS
 vector — and always scanned every Parquet file on every query. This tests
 those fixes, plus the content/index split: search joins the content store
@@ -319,7 +319,7 @@ class TestTimeoutGuard:
 
 
 class TestMultipleAssessmentsPerJob:
-    """§8.4: reprocessing appends a new index row rather than rewriting
+    """Reprocessing appends a new index row rather than rewriting
     the old one, so a job can have several assessment rows on disk at
     once. Search must resolve to only the current one — this exercises
     that against a REAL pipeline + reprocessor, not synthetic fixture

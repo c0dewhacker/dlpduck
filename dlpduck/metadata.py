@@ -1,6 +1,6 @@
 """Companion metadata decoding. Printers emit metadata in varying formats;
 the factory decodes into a flat dict, and the caller allowlists which keys
-survive into the archive (§6.4 — filenames and other free text routinely
+survive into the archive; filenames and other free text routinely
 disclose as much as the document itself, so nothing is kept by default).
 """
 
@@ -100,7 +100,7 @@ MAX_VALUE_CHARS = 4096
 
 def allowlist(raw: dict[str, Any], fields: list[str]) -> dict[str, Any]:
     """Drop every key not explicitly named. Applied before the value ever
-    reaches a JobContext — see §6.4. `filename` is deliberately not in any
+    reaches a JobContext. `filename` is deliberately not in any
     default list; a deployment that wants it has to say so.
 
     Surviving values are also length-capped: the allowlist decides WHICH

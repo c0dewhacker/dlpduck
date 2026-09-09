@@ -1,5 +1,4 @@
-"""Line extraction: native PyMuPDF text where a page has it, RapidOCR where
-it doesn't — decided per page, not per document. See the design doc §5.
+"""Extract native PDF text or use RapidOCR, selected independently per page.
 """
 
 from __future__ import annotations
@@ -22,7 +21,7 @@ class _Box:
 
 
 class LineExtractor:
-    NATIVE_MIN_CHARS = 20  # per page — see §5.1, this used to be per-document
+    NATIVE_MIN_CHARS = 20  # per page; this used to be per document
     # A PDF declares its own page size, so a hostile (or just broken) one
     # can ask for a page metres across. Rasterising that at the configured
     # dpi would allocate a bitmap of hundreds of megapixels — a decompression
@@ -144,7 +143,7 @@ class LineExtractor:
 
         A pure top-edge sort interleaves side-by-side boxes, so a form's
         label and its value land on different "lines" and no rule spanning
-        the pair can ever match. See the design doc §5.2.
+        the pair can ever match.
         """
         if not boxes:
             # Unreachable from _page_rows, which returns early on an empty

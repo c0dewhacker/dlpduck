@@ -453,8 +453,7 @@ def _add_retention(env, line: str) -> None:
 
 
 class TestTestRulesCommand:
-    """The false-positive tuning loop (§7.3): point it at a corpus and see
-    what each rule actually fires on before trusting it in production."""
+    """Show what each rule matches in a corpus before production use."""
 
     def test_reports_per_rule_hit_counts_over_a_corpus(self, env, runner, tmp_path):
         corpus = tmp_path / "corpus"

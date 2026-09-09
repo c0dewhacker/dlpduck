@@ -120,7 +120,7 @@ class TestDisposition:
 
 
 class TestPdfDerivedMetadata:
-    """§2/§6.4: a bare PDF with no companion still yields metadata,
+    """A bare PDF with no companion still yields metadata,
     derived from the PDF's own Info dictionary — and it's exactly as
     subject to the allowlist as companion-file metadata is.
     """
@@ -341,7 +341,7 @@ class TestIndexAndAudit:
 
 
 class TestPluginIntegration:
-    """§9 wired into the real pipeline, not just PluginRunner in isolation:
+    """Plugins are wired into the real pipeline, not just PluginRunner in isolation:
     enrich runs before disposition and can be observed in the committed
     audit_fields; a critical emit failure leaves staging in place instead
     of silently discarding evidence that the sink never got the job.
@@ -488,7 +488,7 @@ class TestContentPurge:
 
     def test_purge_leaves_the_archived_pdf_in_place(self, tmp_path, config):
         # Content-store purge is deliberately narrower than a full document
-        # purge (§8.5) — it's the "wrong text got indexed" case, not
+        # purge — it's the "wrong text got indexed" case, not
         # "delete this document everywhere".
         pipeline = Pipeline(config)
         pdf = _pdf(tmp_path / "clean.pdf", ["content"])

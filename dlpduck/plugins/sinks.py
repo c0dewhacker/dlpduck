@@ -1,6 +1,6 @@
 """Emit-phase plugins: forward a job's outcome to syslog or a generic
 webhook. Both are best-effort — a delivery failure spools the event and
-raises, so a down endpoint never blocks the pipeline (§9.1), but a
+raises, so a down endpoint never blocks the pipeline, but a
 `critical: true` plugin still stops the job for an operator to look at.
 
 The local JSONL audit log (dlpduck.audit.AuditLog) is the always-on,

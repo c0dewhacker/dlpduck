@@ -1,4 +1,4 @@
-"""§8.3: retention is opt-in per store (no window configured = kept
+"""Retention is opt-in per store (no window configured = kept
 forever), a directory delete keyed on the dt= partition name, and the
 audit store specifically needs a checkpoint before deletion so an
 authorized trim doesn't look like tampering to verify().

@@ -1,14 +1,13 @@
 """Discover PDFs (and, when one shows up, their companion metadata file)
 and wait for the PDF to be size-stable before claiming — MFPs write
 non-atomically and a naive create-event watch reads half-written PDFs.
-See the design doc §2, stage 1.
 
 A companion file is a convenience, never a requirement: even with
 `metadata_format` configured, a bare PDF dropped with nothing alongside
 it — a person, or a process, just dropping a file — is still processed,
 after a bounded grace period in case a companion is genuinely en route.
 There simply won't be the richer metadata a companion would have carried;
-Pipeline.claim() still derives what it can from the PDF itself (§6.4).
+Pipeline.claim() still derives what it can from the PDF itself.
 """
 
 from __future__ import annotations

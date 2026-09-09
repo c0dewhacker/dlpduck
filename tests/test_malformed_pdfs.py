@@ -199,7 +199,7 @@ class TestRotatedPages:
 
 class TestMixedDocuments:
     def test_a_document_mixing_native_and_scanned_pages_reads_both(self, config):
-        """Per-page extraction is the §5.1 fix; this is it end to end."""
+        """Exercise mixed native and scanned page extraction end to end."""
         typeset = pymupdf.open()
         page = typeset.new_page(width=595, height=842)
         page.insert_text((60, 100), "Card 4111 1111 1111 1111", fontsize=22)

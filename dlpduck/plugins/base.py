@@ -1,7 +1,7 @@
 """One plugin protocol, two phases — enrich runs before disposition so it
 can inform routing, emit runs after commit. Deliberately not two separate
 class hierarchies for "plugins" and "audit sinks": a sink is just an
-emit-phase plugin. See the design doc §9.
+emit-phase plugin.
 """
 
 from __future__ import annotations

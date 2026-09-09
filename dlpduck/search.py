@@ -1,7 +1,7 @@
-"""Full-text search, joining the content store (raw `full_text`) against
-the metadata index (disposition, severity, hits) by job_id. See the design
-doc §10.6 and dlpduck/schema.py for why these are two separate Parquet
-stores.
+"""Join raw document text with permanent assessment metadata by job ID.
+
+The separate Parquet stores let operators purge content while retaining
+the audit history.
 
 Because it's an inner join, a job whose content has been purged
 (dlpduck.content.purge_content) simply has no row in the content store and
@@ -152,7 +152,7 @@ def search(
     # severity, limit, and both parquet globs — is a bound parameter.
     sql = f"""
         WITH latest AS (
-            -- A job accumulates one index row per assessment (§8.4);
+            -- A job accumulates one index row per assessment;
             -- search must only ever see the current one, or a reprocessed
             -- job would show stale or duplicate results.
             SELECT * FROM read_parquet(?, hive_partitioning = true, union_by_name = true)
@@ -184,7 +184,7 @@ def search(
     con.execute("SET TimeZone='UTC'")
     # DuckDB has no built-in statement_timeout in this version — interrupt
     # the connection from a watchdog thread instead, the same "bound with
-    # a clock rather than refuse the query" guard described in §10.6.
+    # a clock rather than refuse the query" guard.
     timer = threading.Timer(timeout_seconds, con.interrupt)
     timer.daemon = True
     timer.start()

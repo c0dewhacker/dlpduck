@@ -2,11 +2,11 @@
 `username` + `roles`, established at login and read directly from the
 session on every later request, never re-derived from a store:
 
-- Local accounts (§10.4's air-gapped fallback / break-glass path):
+- Local accounts (the air-gapped fallback and break-glass path):
   argon2id-hashed passwords, configured in `console.auth.users`. Never a
   plaintext password in config — hash one with `dlpduck console
   hash-password`.
-- OIDC (§10.4's primary path, dlpduck.console.oidc): an external IdP
+- OIDC (the primary path, implemented in dlpduck.console.oidc): an external IdP
   authenticates the person; the roles come from an ID token claim.
 
 Because both write the same two session keys, RBAC (`require_permission`)
@@ -97,7 +97,7 @@ class LocalUserStore:
         return self._by_username.get(username)
 
     def all_users(self) -> list[LocalAccount]:
-        """For the Access screen (§10.2) — a read-only view, since
+        """Return accounts for the read-only Access screen, since
         accounts live in config, not a store this could write back to.
         """
         return sorted(self._by_username.values(), key=lambda u: u.username)
@@ -120,7 +120,7 @@ class LoginThrottle:
     alone leaves a hole: per-username only lets one host spray many
     accounts, per-address only lets a botnet grind one account.
 
-    In-process and per-process, matching the single-daemon design (§1). It
+    In-process and per-process, matching the single-daemon design. It
     is not a substitute for a WAF in front of an internet-facing console,
     and it isn't shared across replicas.
     """

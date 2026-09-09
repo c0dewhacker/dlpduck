@@ -1,9 +1,9 @@
 """Rebuild the metadata index after losing it — from the content store
 where that survives, and from the archived PDFs themselves (a real
 re-extraction, via the same LineExtractor the ingest path uses) where
-content was lost too. See the design doc §12.
+content was lost too.
 
-Content survives independently of the index (§8.1's split), so the common
+Content survives independently of the index, so the common
 recovery case never re-runs OCR — only a job whose content was ALSO lost
 falls back to re-extracting. Rebuilt rows start a fresh assessment history
 at seq=1: the index being rebuilt is precisely what recorded any prior
@@ -199,7 +199,7 @@ class Reindexer:
         # silently declassify: a document quarantined under an older
         # ruleset that no longer matches would come back marked "archive",
         # with release_pending unset and no job.released event — walking
-        # straight past the human gate that a de-escalation (§8.4)
+        # straight past the human gate that a de-escalation
         # deliberately requires, while the file itself stayed in
         # quarantine forever. Re-judging a document against a new ruleset
         # is what `dlpduck reprocess` is for: explicit, audited, and

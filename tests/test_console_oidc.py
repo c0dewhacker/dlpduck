@@ -1,4 +1,4 @@
-"""§10.4: OIDC is the primary auth path, local accounts are the
+"""OIDC is the primary auth path, while local accounts are the
 break-glass fallback. The token exchange itself (authlib talking to a
 real IdP) is proven against an actual running Keycloak as a live smoke
 test, not here — these tests stub `authorize_access_token` at the

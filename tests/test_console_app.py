@@ -321,7 +321,7 @@ class TestJobDetailPermissions:
         assert "audit.read" in resp.text  # the denial message
 
     def test_auditor_sees_both_the_audit_timeline_and_masked_hits(self, env):
-        # Per the design doc's matrix (§10.5), Auditor legitimately holds
+        # Auditor legitimately holds
         # dlp.hits.read — they need to see masked hits to audit what
         # happened. What they don't get is full_text/PDF access or reveal.
         client = env["client"]
@@ -678,7 +678,7 @@ class TestPurgeAction:
 
 
 class TestPurgeStatus:
-    """Purge never touches the index row (§8.5), so whether a job was
+    """Purge never touches the index row, so whether a job was
     purged has to be derived from what's actually on disk — this covers
     that the job detail page surfaces it plainly instead of only in the
     audit trail, and stops offering PDF actions that would just 404.
@@ -1341,7 +1341,7 @@ class TestMalformedDateFiltersAreHandled:
 
 
 class TestPendingReleaseStillCountsAsQuarantined:
-    """A de-escalation (§8.4) records the new disposition immediately but
+    """A de-escalation records the new disposition immediately but
     deliberately leaves the PDF in quarantine until someone with
     quarantine.release approves the move. Gating PDF access on disposition
     alone handed that window to Investigator — the exact thing

@@ -131,7 +131,7 @@ def scan(pdf_path: str, config_path: str) -> None:
 @click.option("--rule", "rule_id", default=None, help="Only report this rule id")
 def test_rules(corpus: str, config_path: str, rule_id: str | None) -> None:
     """Run the ruleset over a directory of real documents; print per-rule
-    hit counts and matching lines. The false-positive tuning loop (§7.3)."""
+    hit counts and matching lines for false-positive tuning."""
     config = load_config(config_path)
     extractor = LineExtractor(
         dpi=config.extraction.dpi,
@@ -216,7 +216,7 @@ def reprocess(
     end_str: str | None,
 ) -> None:
     """Re-run the current ruleset against already-ingested documents
-    (§8.4). Preview by default; pass --commit to actually append new
+    without reopening the PDF. Preview by default; pass --commit to append new
     assessments.
 
     Escalations (archive -> quarantine) are applied and move the PDF
@@ -368,7 +368,7 @@ def search(
 ) -> None:
     """Full-text search, joining the content store against the metadata
     index. The date range is optional — omit it to search everything, at
-    the cost of a full scan (§10.6). A job whose content has been purged
+    the cost of a full scan. A job whose content has been purged
     (see `purge-content`) never matches, even though its index row and
     audit trail still exist."""
     config = load_config(config_path)
@@ -397,7 +397,7 @@ def search(
 
     # An unbounded search is a legitimate query, not an incident — but
     # "who searched the entire archive, and for what" is a fair question
-    # for a reviewer to be able to ask later (§10.6).
+    # for a reviewer to be able to ask later.
     audit = AuditLog(config.destination.work_dir / "audit", integrity=config.audit.integrity)
     audit.append(
         "ui.search",
@@ -432,7 +432,7 @@ def search(
               help="Actually delete eligible partitions. Default is dry-run: report only.")
 def retention(config_path: str, do_apply: bool) -> None:
     """Drop whole dt= partitions past each store's configured retention
-    window (§8.3). A store with no window configured is never touched.
+    window. A store with no window configured is never touched.
     Dry run by default."""
     config = load_config(config_path)
     plans = plan_retention(config)
@@ -479,7 +479,7 @@ def retention(config_path: str, do_apply: bool) -> None:
 def redact_audit_cmd(
     config_path: str, seq: int, fields: tuple[str, ...], reason: str, actor: str | None
 ) -> None:
-    """Remove named fields from one already-written audit event (§8.5).
+    """Remove named fields from one already-written audit event.
 
     For when something that should not be permanent lands in the trail — a
     search term, a filename inside an error, an allowlisted metadata value
@@ -511,7 +511,7 @@ def redact_audit_cmd(
 @click.option("--commit", "do_commit", is_flag=True, default=False,
               help="Actually merge. Default is dry-run: report only.")
 def compact_index(config_path: str, do_commit: bool) -> None:
-    """Merge each day's assessment files into one (§8.1).
+    """Merge each day's assessment files into one.
 
     The write path deliberately produces one small Parquet file per
     assessment — atomic and safe under contention. The read path pays for
@@ -609,7 +609,7 @@ def run(config_path: str) -> None:
               help="Actually write rebuilt rows. Default is dry-run: report only.")
 def reindex(config_path: str, do_commit: bool) -> None:
     """Rebuild the metadata index from the content store and, where
-    content was also lost, the archived PDFs (§12). Only touches jobs
+    content was also lost, the archived PDFs. Only touches jobs
     missing from the index — already-indexed jobs are left alone. Dry
     run by default."""
     from dlpduck.reindex import Reindexer
@@ -670,7 +670,7 @@ def reindex(config_path: str, do_commit: bool) -> None:
 
 @main.group()
 def console() -> None:
-    """Admin console — local-account auth, job queue and job detail (§10)."""
+    """Admin console with authentication, job queue, and job details."""
 
 
 @console.command("hash-password")

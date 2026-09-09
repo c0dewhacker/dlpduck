@@ -1,9 +1,8 @@
 """Write assessment rows to the metadata index. Never includes
 `full_text` — that lives only in the content store (dlpduck.content), so
-this file is permanent: nothing in it is ever a reason to delete it. See
-the design doc §8.1.
+this file is permanent: nothing in it is ever a reason to delete it.
 
-A job accumulates one row per assessment (§8.4) rather than being
+A job accumulates one row per assessment rather than being
 overwritten — `write_index_row` is the normal ingest path (assessment_seq
 1); `dlpduck.reprocess` appends further ones through the shared
 `write_row` helper below.
@@ -102,7 +101,7 @@ def write_row(
     every assessment of a job coexists without clashing.
 
     `exclusive=True` refuses to overwrite an existing assessment. The
-    history is append-only (§8.4), but the sequence number is chosen by
+    history is append-only, but the sequence number is chosen by
     reading the current highest and adding one — so two writers racing
     (the console and the CLI, or two operators clicking commit) both pick
     the same number, and a plain write would silently destroy one of them

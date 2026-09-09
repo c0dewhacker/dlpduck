@@ -1,19 +1,19 @@
 """Hash-chained JSONL audit log. The audit trail is the source of truth for
-what happened (design doc §3, §8.2) — the Parquet index is derived from it
+what happened; the Parquet index is derived from it
 and from the archived PDFs, and is rebuildable if lost.
 
-Chaining is a feature flag (`audit.integrity: chained | none`, §8.2): a
+Chaining is controlled by `audit.integrity: chained | none`: a
 development install, or a deployment that would rather not run an
 integrity-sealed ledger at all, can turn it off.
 
 Two things have to be able to remove content from an append-only log, and
 both are handled here without making `verify()` cry tampering. Per-event
-redaction (§8.5, `redact()`) empties named fields from a single event when
+redaction with `redact()` empties named fields from a single event when
 something that should not be permanent lands in the trail; the event keeps
 its place in the chain and the removal is itself a chained event, so this
 loses the proof of one event's contents but never happens silently.
 
-Retention (§8.3) is the other: it deletes whole old partitions, and naively
+Retention is the other: it deletes whole old partitions, and naively
 doing that would make `verify()` report the resulting gap as tampering, since
 the oldest surviving event's `prev` would point at a hash nothing on disk can
 produce any more. `write_trim_checkpoint` records that hash *before* the deletion
@@ -181,7 +181,7 @@ class AuditLog:
 
     Safe for concurrent writers, threads and processes alike. That is not
     a luxury: the recommended deployment runs the daemon and the console
-    as two processes over one work_dir (§1), and the console appends on
+    as two processes over one work directory, and the console appends on
     every search, PDF view, purge and login — so "one writer" was an
     assumption the documented setup broke on the first search anyone ran.
     See `_appending` for how it is held, and why the chain state is
@@ -229,7 +229,7 @@ class AuditLog:
 
     def write_trim_checkpoint(self, partitions_being_removed: list[Path]) -> dict[str, Any] | None:
         """Call this before deleting any dt= partition directories (as
-        retention, §8.3, does): records the hash of the last event in the
+        retention does): records the hash of the last event in the
         newest of the partitions about to go — exactly the hash the
         earliest surviving event's `prev` already points to — so
         `verify()` treats that as the trusted start of the chain instead
@@ -355,7 +355,7 @@ class AuditLog:
         The trail is append-only and hash-chained, which is what makes it
         evidence — but "append-only" and "an erasure request" eventually
         collide. Something sensitive does land in here: a search term
-        (§10.6), a filename inside a parse error, an allowlisted metadata
+        entered in the console, a filename inside a parse error, allowlisted metadata
         value. Until now the only options were to keep it forever or drop
         a whole partition.
 
@@ -466,7 +466,7 @@ class AuditLog:
     def job_ids_with_event(self, *event_types: str) -> set[str]:
         """Every job id named by an event of any of these types.
 
-        Exists for disaster recovery (§12), which needs to know what was
+        Exists for disaster recovery, which needs to know what was
         purged before it rebuilds anything — the audit trail is the only
         surviving record of that once the index is gone, which is exactly
         the situation a rebuild is for. Same substring pre-filter as

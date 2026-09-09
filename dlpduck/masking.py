@@ -1,8 +1,7 @@
 """Never store the value a rule matched. Store a masked form for humans and
 a keyed digest for correlation instead.
 
-See the design doc §6.4 for why this exists and §13 for the v1 bug it fixes
-(raw matched_text was written to the index, the audit log, and every sink).
+The v1 implementation wrote raw matched text to the index, audit log, and sinks.
 """
 
 from __future__ import annotations

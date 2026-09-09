@@ -1,9 +1,9 @@
 """Re-evaluate already-committed jobs against the CURRENT ruleset, without
 re-running OCR, appending a new assessment rather than overwriting the
-old one. See the design doc §8.4.
+old one.
 
 Reprocessing is append-only, for the same reason the content/index split
-exists (§8.5): "this document was assessed as clean on 3 September under
+exists: "this document was assessed as clean on 3 September under
 ruleset 8f2a1c" is an evidential claim, and silently replacing it with a
 different answer six weeks later is exactly the tampering the audit chain
 exists to detect. A reassessment is a new row; nothing is ever rewritten.
@@ -30,7 +30,7 @@ LineExtractor — for an OCR model upgrade, or recovering a job whose
 original extraction was degraded — and is correspondingly slower; a
 successful extract-mode reassessment also overwrites the content store
 with the fresh text (the content store holds only the current text, not
-a history, same as design doc §8.1) and writes real, re-derived
+a history) and writes real, re-derived
 page_count / ocr_page_count / min_ocr_confidence / degraded rather than
 carrying the old ones forward.
 """
@@ -152,9 +152,8 @@ def latest_index_rows(
     offset: int = 0,
 ) -> list[dict]:
     """The current assessment per job — the highest assessment_seq for
-    each job_id, exactly the read pattern the design doc gives for
-    "current verdict" (§8.4): no is_current flag to keep in sync, correct
-    by construction.
+    each job_id. With no is_current flag to synchronize, this remains
+    correct by construction.
 
     `limit` bounds the result in the query rather than after it. The
     console's job list has no natural bound otherwise: it read every row
@@ -377,7 +376,7 @@ class Reprocessor:
     ) -> ReprocessSummary:
         """Report what reprocessing would change. Writes nothing at all —
         the default mode, and the one people should actually live in
-        (§7.3's rule-tuning loop). "extract" mode previews are slower
+        (the rule-tuning workflow). "extract" mode previews are slower
         (real OCR per document) but check exactly what a commit would do,
         including cases only a fresh extraction could catch."""
         rows = self._scope_rows(job_ids, start, end)
@@ -626,7 +625,7 @@ class Reprocessor:
 
     def _refresh_content_only(self, row: dict, text: DocumentText) -> None:
         """extract mode: the content store holds only the current text,
-        never a history (§8.1) — a fresh extraction replaces what was
+        never a history — a fresh extraction replaces what was
         there, the same as a plain re-ingest would. Used both when a new
         assessment is written and when the verdict is unchanged but the
         content still needed recovering (e.g. it had been purged).
@@ -678,7 +677,7 @@ class Reprocessor:
 
         partition.mkdir(parents=True, exist_ok=True)
         # shutil.move, not Path.replace — archive and quarantine are
-        # deliberately recommended to sit on separate mounts (§8) for ACL
+        # deliberately recommended to sit on separate mounts for ACL
         # separation, and a plain rename() raises across filesystems.
         move_durably(src, dest)
         return str(dest)
