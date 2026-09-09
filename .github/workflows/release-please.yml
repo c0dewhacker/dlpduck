@@ -28,6 +28,7 @@ jobs:
     outputs:
       release_created: ${{ github.event_name == 'workflow_dispatch' || steps.release.outputs.release_created }}
       tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || steps.release.outputs.tag_name }}
+      pr: ${{ steps.release.outputs.pr }}
     steps:
       - name: Open or update the release PR
         id: release
@@ -37,6 +38,41 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+  sync-lockfile:
+    name: Sync uv.lock with the release PR's version bump
+    needs: release-please
+    if: needs.release-please.outputs.pr != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ fromJson(needs.release-please.outputs.pr).headBranchName }}
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      # release-please bumps pyproject.toml's [project].version but has no
+      # way to know uv.lock also embeds that version in the dlpduck
+      # package's own lock entry — so every release PR left uv.lock
+      # pointing at the pre-bump version, and `uv sync --locked` (this
+      # workflow's own lint/test/build jobs) failed on every one of them.
+      # Regenerating is simpler and more robust than trying to patch the
+      # version string in place.
+      - name: Regenerate the lockfile
+        run: uv lock
+      - name: Commit if uv.lock changed
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- uv.lock; then
+            echo "uv.lock already matches — nothing to do"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add uv.lock
+          git commit -m "chore: sync uv.lock with the release PR's version bump"
+          git push
 
   build-release:
     name: Build and attach release distributions
