@@ -11,12 +11,13 @@ suite and deliberately few.
 
 from pathlib import Path
 
-import pymupdf
+import pypdfium2 as pdfium
 import pytest
 
 from dlpduck.config import Config
 from dlpduck.extract import LineExtractor
 from dlpduck.pipeline import Pipeline
+from tests.pdf_factory import image_only_pdf
 
 DEFAULT_RULES_PATH = Path(__file__).resolve().parents[1] / "dlpduck" / "builtin_rules" / "default.yaml"
 
@@ -24,18 +25,7 @@ DEFAULT_RULES_PATH = Path(__file__).resolve().parents[1] / "dlpduck" / "builtin_
 def _scanned_pdf(path: Path, lines: list[str], dpi: int = 200) -> Path:
     """A PDF containing only an image of text — exactly what an MFP
     produces, and what every other test in the suite avoids."""
-    typeset = pymupdf.open()
-    page = typeset.new_page(width=595, height=842)
-    y = 100
-    for line in lines:
-        page.insert_text((60, y), line, fontsize=22)
-        y += 50
-    pix = page.get_pixmap(dpi=dpi)
-
-    scanned = pymupdf.open()
-    image_page = scanned.new_page(width=595, height=842)
-    image_page.insert_image(pymupdf.Rect(0, 0, 595, 842), stream=pix.tobytes("png"))
-    scanned.save(path)
+    path.write_bytes(image_only_pdf(lines, dpi=dpi))
     return path
 
 
@@ -48,7 +38,14 @@ class TestScannedDocumentsAreRead:
     def test_a_page_with_no_text_layer_goes_through_ocr(self, tmp_path, extractor):
         pdf = _scanned_pdf(tmp_path / "scan.pdf", ["Card 4111 1111 1111 1111"])
         # Precondition: there really is nothing for the native path to find.
-        assert not pymupdf.open(pdf)[0].get_text("text").strip()
+        with pdfium.PdfDocument(pdf) as document:
+            page = document[0]
+            text_page = page.get_textpage()
+            try:
+                assert not text_page.get_text_bounded().strip()
+            finally:
+                text_page.close()
+                page.close()
 
         text = extractor.extract(pdf.read_bytes())
 

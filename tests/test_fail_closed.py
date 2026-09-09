@@ -9,7 +9,6 @@ to end somewhere safe (failed/ or quarantine), never in the archive.
 import json
 from pathlib import Path
 
-import pymupdf
 import pytest
 
 from dlpduck.config import Config
@@ -21,6 +20,7 @@ from dlpduck.types import (
     TextLine,
     UnsafeSourceFile,
 )
+from tests.pdf_factory import make_pdf
 
 DEFAULT_RULES_PATH = Path(__file__).resolve().parents[1] / "dlpduck" / "builtin_rules" / "default.yaml"
 
@@ -53,14 +53,7 @@ def config(tmp_path, monkeypatch):
 
 
 def _pdf(path: Path, lines: list[str], pages: int = 1) -> Path:
-    doc = pymupdf.open()
-    for _ in range(pages):
-        page = doc.new_page(width=595, height=842)
-        y = 40
-        for line in lines:
-            page.insert_text((40, y), line)
-            y += 20
-    doc.save(path)
+    path.write_bytes(make_pdf([lines] * pages))
     return path
 
 
@@ -243,7 +236,7 @@ class TestClaimTimeRefusalsAreRoutedNotLost:
 
         The bytes are captured once and rewritten, rather than
         regenerating the PDF each time: "the same file" has to be true by
-        construction, not contingent on PyMuPDF emitting byte-identical
+        construction, not contingent on the fixture generator emitting byte-identical
         output twice — which it does not reliably do, and which made an
         earlier version of this test flaky in the full suite.
         """
@@ -286,7 +279,7 @@ class TestExtractionFailuresFailClosed:
         pipeline = Pipeline(config)
 
         def _boom(_pdf_bytes):
-            raise RuntimeError("mupdf exploded")
+            raise RuntimeError("pdfium exploded")
 
         pipeline.extractor.extract = _boom
         pdf = _pdf(tmp_path / "doc.pdf", ["content"])
@@ -356,7 +349,7 @@ class TestRuleBudgetFailsTheJob:
         # A rule that can't finish means the document was never fully
         # assessed — it must not be archived on the strength of a partial scan.
         # The extractor is stubbed rather than fed a pathological PDF:
-        # PyMuPDF clips inserted text at the page edge (~91 chars), which is
+        # PDF readers clip inserted text at the page edge, which is
         # far too short to make the pattern backtrack. What's under test here
         # is the pipeline's handling of the exception, not the engine's
         # timing — test_engine.py covers that end.

@@ -5,9 +5,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import pymupdf
+import pypdfium2 as pdfium
+from pypdfium2 import raw as pdfium_c
 from rapidocr_onnxruntime import RapidOCR
 
+from dlpduck.pdfium import PDFIUM_LOCK, is_password_error, open_document
 from dlpduck.types import DocumentText, EncryptedDocument, PageTooLarge, TextLine
 
 
@@ -49,39 +51,45 @@ class LineExtractor:
         return self._extract(pdf_bytes)
 
     def _extract(self, pdf_bytes: bytes) -> DocumentText:
-        doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
-        if doc.needs_pass:
-            raise EncryptedDocument()
-
-        out = DocumentText(page_count=len(doc))
-        n = 0
-        # pymupdf's Document is iterable at runtime; its stubs don't say so.
-        for idx, page in enumerate(doc):  # type: ignore[arg-type, var-annotated]
+        with PDFIUM_LOCK:
             try:
-                rows, source, conf = self._page_rows(page)
-            except Exception:
-                out.degraded = True  # -> quarantine, never silently drop a page
-                out.failed_page_count += 1
-                continue
-            if not rows:
-                out.degraded = True
-            if source == "ocr":
-                out.ocr_page_count += 1
-            for on_page, text in enumerate(rows):
-                out.add_line(
-                    TextLine(
-                        line_number=n,
-                        page_number=idx + 1,
-                        line_on_page=on_page,
-                        lines_on_page=len(rows),
-                        text=text,
-                        source=source,
-                        confidence=conf,
-                    )
-                )
-                n += 1
-        doc.close()
-        return out
+                document = open_document(pdf_bytes)
+            except pdfium.PdfiumError as exc:
+                if is_password_error(exc):
+                    raise EncryptedDocument() from None
+                raise
+
+            with document:
+                out = DocumentText(page_count=len(document))
+                n = 0
+                for idx in range(len(document)):
+                    page = document[idx]
+                    try:
+                        rows, source, conf = self._page_rows(page)
+                    except Exception:
+                        out.degraded = True  # -> quarantine, never silently drop a page
+                        out.failed_page_count += 1
+                        continue
+                    finally:
+                        page.close()
+                    if not rows:
+                        out.degraded = True
+                    if source == "ocr":
+                        out.ocr_page_count += 1
+                    for on_page, text in enumerate(rows):
+                        out.add_line(
+                            TextLine(
+                                line_number=n,
+                                page_number=idx + 1,
+                                line_on_page=on_page,
+                                lines_on_page=len(rows),
+                                text=text,
+                                source=source,
+                                confidence=conf,
+                            )
+                        )
+                        n += 1
+                return out
 
     def _safe_dpi(self, page) -> int:
         """The configured dpi, reduced so this page fits MAX_RASTER_PIXELS.
@@ -95,9 +103,9 @@ class LineExtractor:
         degraded, which quarantines the document. Failing closed on a
         page nobody can OCR beats allocating a terabyte to prove it.
         """
-        rect = page.rect
-        width_in = max(rect.width, 1) / 72
-        height_in = max(rect.height, 1) / 72
+        width, height = page.get_size()
+        width_in = max(width, 1) / 72
+        height_in = max(height, 1) / 72
         pixels = width_in * height_in * self.dpi * self.dpi
         if pixels <= self.MAX_RASTER_PIXELS:
             return self.dpi
@@ -112,14 +120,26 @@ class LineExtractor:
         return reduced
 
     def _page_rows(self, page) -> tuple[list[str], str, float | None]:
-        native = [t.strip() for t in page.get_text("text").splitlines() if t.strip()]
-        if sum(len(t) for t in native) >= self.NATIVE_MIN_CHARS and not page.get_image_info():
+        text_page = page.get_textpage()
+        try:
+            native = [line.strip() for line in text_page.get_text_bounded().splitlines() if line.strip()]
+        finally:
+            text_page.close()
+        # PDFium reports bounded text bottom-to-top for quarter-turn pages.
+        # Restore the content order used by unrotated and other rotated pages.
+        if page.get_rotation() == 90:
+            native.reverse()
+        has_images = any(page.get_objects(filter=[pdfium_c.FPDF_PAGEOBJ_IMAGE]))
+        if sum(len(line) for line in native) >= self.NATIVE_MIN_CHARS and not has_images:
             return native, "native", None
 
-        pix = page.get_pixmap(dpi=self._safe_dpi(page))
+        bitmap = page.render(scale=self._safe_dpi(page) / 72)
         if self._ocr is None:
             self._ocr = RapidOCR(intra_op_num_threads=1, inter_op_num_threads=1)
-        result, _ = self._ocr(pix.tobytes("png"))
+        try:
+            result, _ = self._ocr(bitmap.to_numpy())
+        finally:
+            bitmap.close()
         if not result:
             return [], "ocr", None
 

@@ -9,12 +9,12 @@ strength of an extraction that did not happen.
 
 from pathlib import Path
 
-import pymupdf
 import pytest
 
 from dlpduck.config import Config
 from dlpduck.extract import LineExtractor
 from dlpduck.pipeline import Pipeline
+from tests.pdf_factory import image_only_pdf, join_pdfs, make_pdf, rotate_pdf
 
 DEFAULT_RULES_PATH = Path(__file__).resolve().parents[1] / "dlpduck" / "builtin_rules" / "default.yaml"
 
@@ -51,28 +51,13 @@ def _run(config, name: str, data: bytes):
 
 
 def _ordinary_pdf(text: str = "an ordinary memo") -> bytes:
-    doc = pymupdf.open()
-    doc.new_page(width=595, height=842).insert_text((40, 40), text)
-    return doc.tobytes()
+    return make_pdf([[text]])
 
 
 def _image_only_pdf(fill: int | None = None, text: str | None = None) -> bytes:
     """A page with no text layer. `fill` paints featureless grey — a scan
     OCR cannot read; `text` rasterises real words."""
-    if text is not None:
-        typeset = pymupdf.open()
-        page = typeset.new_page(width=595, height=842)
-        page.insert_text((60, 100), text, fontsize=22)
-        pix = page.get_pixmap(dpi=200)
-    else:
-        pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 1200, 1700))
-        pix.clear_with(fill if fill is not None else 200)
-
-    scan = pymupdf.open()
-    scan.new_page(width=595, height=842).insert_image(
-        pymupdf.Rect(0, 0, 595, 842), pixmap=pix
-    )
-    return scan.tobytes()
+    return image_only_pdf([text] if text is not None else None, fill=200 if fill is None else fill)
 
 
 class TestNothingUnreadableReachesTheCleanArchive:
@@ -95,7 +80,8 @@ class TestNothingUnreadableReachesTheCleanArchive:
         assert ctx.reason == "no_text_extracted"
 
         _, other = _run(config, "garbage.pdf", b"GIF89a definitely not a pdf")
-        assert other.reason == "degraded_extraction"
+        assert other.reason.startswith("extraction_error:")
+        assert other.disposition == "failed"
 
     def test_an_install_can_opt_out_deliberately(self, tmp_path, monkeypatch):
         monkeypatch.setenv("DLPDUCK_HMAC_KEY", "test-key-not-for-production")
@@ -171,13 +157,10 @@ class TestRotatedPages:
 
     @pytest.mark.parametrize("rotation", [0, 90, 180, 270])
     def test_native_text_survives_any_rotation(self, rotation):
-        doc = pymupdf.open()
-        page = doc.new_page(width=595, height=842)
-        page.insert_text((60, 100), "Card 4111 1111 1111 1111", fontsize=18)
-        page.insert_text((60, 140), "Second line of the page", fontsize=18)
-        page.set_rotation(rotation)
-
-        text = LineExtractor().extract(doc.tobytes())
+        pdf = make_pdf(
+            [["Card 4111 1111 1111 1111", "Second line of the page"]], font_size=18
+        )
+        text = LineExtractor().extract(rotate_pdf(pdf, rotation))
 
         assert [line.text for line in text.lines] == [
             "Card 4111 1111 1111 1111",
@@ -186,12 +169,8 @@ class TestRotatedPages:
 
     @pytest.mark.parametrize("rotation", [0, 90, 180, 270])
     def test_a_rotated_document_is_still_judged(self, config, rotation):
-        doc = pymupdf.open()
-        page = doc.new_page(width=595, height=842)
-        page.insert_text((60, 100), "Card 4111 1111 1111 1111", fontsize=18)
-        page.set_rotation(rotation)
-
-        _, ctx = _run(config, f"rot{rotation}.pdf", doc.tobytes())
+        pdf = rotate_pdf(make_pdf([["Card 4111 1111 1111 1111"]], font_size=18), rotation)
+        _, ctx = _run(config, f"rot{rotation}.pdf", pdf)
 
         assert ctx.disposition == "quarantine"
         assert any(h.rule_id == "pan.generic" for h in ctx.hits)
@@ -200,18 +179,11 @@ class TestRotatedPages:
 class TestMixedDocuments:
     def test_a_document_mixing_native_and_scanned_pages_reads_both(self, config):
         """Exercise mixed native and scanned page extraction end to end."""
-        typeset = pymupdf.open()
-        page = typeset.new_page(width=595, height=842)
-        page.insert_text((60, 100), "Card 4111 1111 1111 1111", fontsize=22)
-        raster = page.get_pixmap(dpi=200)
-
-        doc = pymupdf.open()
-        native = doc.new_page(width=595, height=842)
-        native.insert_text((40, 40), "This page has a real text layer on it.")
-        scanned = doc.new_page(width=595, height=842)
-        scanned.insert_image(pymupdf.Rect(0, 0, 595, 842), pixmap=raster)
-
-        _, ctx = _run(config, "mixed.pdf", doc.tobytes())
+        pdf = join_pdfs(
+            make_pdf([["This page has a real text layer on it."]]),
+            image_only_pdf(["Card 4111 1111 1111 1111"]),
+        )
+        _, ctx = _run(config, "mixed.pdf", pdf)
 
         sources = {line.source for line in ctx.text.lines}
         assert sources == {"native", "ocr"}, sources

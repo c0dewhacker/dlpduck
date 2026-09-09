@@ -5,16 +5,12 @@ level in test_pipeline.py), and filename parsing is deliberately not
 built.
 """
 
-import pymupdf
-
 from dlpduck.pdf_metadata import extract_pdf_metadata
+from tests.pdf_factory import make_pdf, with_metadata, without_metadata
 
 
 def _pdf_bytes(metadata: dict) -> bytes:
-    doc = pymupdf.open()
-    doc.set_metadata(metadata)
-    doc.new_page().insert_text((40, 40), "content")
-    return doc.tobytes()
+    return with_metadata(make_pdf([["content"]]), metadata)
 
 
 class TestExtractPdfMetadata:
@@ -32,9 +28,7 @@ class TestExtractPdfMetadata:
         assert "pdf_author" not in meta
 
     def test_pdf_with_no_metadata_at_all_yields_empty_dict(self):
-        doc = pymupdf.open()
-        doc.new_page().insert_text((40, 40), "content")
-        meta = extract_pdf_metadata(doc.tobytes())
+        meta = extract_pdf_metadata(without_metadata(make_pdf([["content"]])))
         assert meta == {}
 
     def test_unreadable_bytes_yield_empty_dict_not_an_exception(self):

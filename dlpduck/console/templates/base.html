@@ -324,7 +324,9 @@
     <div class="brand"><img class="mark" src="/static/mascot-badge-32.png" alt="" width="30" height="30">DLPDuck<small>console</small></div>
     <nav aria-label="Main navigation">
       <a class="navlink {% if request.url.path == '/' %}active{% endif %}" {% if request.url.path == '/' %}aria-current="page"{% endif %} href="/">Overview</a>
-      <a class="navlink {% if request.url.path.startswith('/jobs') %}active{% endif %}" {% if request.url.path.startswith('/jobs') %}aria-current="page"{% endif %} href="/jobs">Jobs</a>
+      {% set on_quarantine = request.url.path.startswith('/jobs') and request.query_params.get('disposition') == 'quarantine' %}
+      <a class="navlink {% if request.url.path.startswith('/jobs') and not on_quarantine %}active{% endif %}" {% if request.url.path.startswith('/jobs') and not on_quarantine %}aria-current="page"{% endif %} href="/jobs">Jobs</a>
+      <a class="navlink {% if on_quarantine %}active{% endif %}" {% if on_quarantine %}aria-current="page"{% endif %} href="/jobs?disposition=quarantine">Quarantine</a>
       {% if has_permission(user.roles, "jobs.failed.manage") %}<a class="navlink {% if request.url.path.startswith('/failed') %}active{% endif %}" {% if request.url.path.startswith('/failed') %}aria-current="page"{% endif %} href="/failed">Needs attention</a>{% endif %}
       {% if has_permission(user.roles, "jobs.text.read") %}<a class="navlink {% if request.url.path == '/search' %}active{% endif %}" {% if request.url.path == '/search' %}aria-current="page"{% endif %} href="/search">Search</a>{% endif %}
       <a class="navlink {% if request.url.path == '/rules' %}active{% endif %}" {% if request.url.path == '/rules' %}aria-current="page"{% endif %} href="/rules">Rules</a>

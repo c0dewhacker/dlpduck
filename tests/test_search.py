@@ -19,6 +19,7 @@ import dlpduck.search as search_module
 from dlpduck.content import purge_content
 from dlpduck.schema import CONTENT_SCHEMA, INDEX_SCHEMA
 from dlpduck.search import MAX_QUERY_CHARS, QueryTimeout, SearchError, search
+from tests.pdf_factory import write_pdf
 
 # Job ids are content-derived 32-hex digests in reality, and the store
 # helpers now validate that shape before globbing for a file — so the
@@ -328,15 +329,7 @@ class TestMultipleAssessmentsPerJob:
     """
 
     def _pdf(self, path, lines):
-        import pymupdf
-
-        doc = pymupdf.open()
-        page = doc.new_page(width=595, height=842)
-        y = 40
-        for line in lines:
-            page.insert_text((40, y), line)
-            y += 20
-        doc.save(path)
+        write_pdf(path, lines)
         return path
 
     def test_search_reflects_the_post_reprocess_severity_not_the_original(

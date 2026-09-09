@@ -9,13 +9,13 @@ degraded document into a clean one.
 from datetime import UTC
 from pathlib import Path
 
-import pymupdf
 import pytest
 
 from dlpduck.config import Config
 from dlpduck.content import purge_content
 from dlpduck.pipeline import Pipeline, content_job_id
 from dlpduck.reprocess import Reprocessor, latest_index_rows
+from tests.pdf_factory import write_pdf
 
 DEFAULT_RULES_PATH = Path(__file__).resolve().parents[1] / "dlpduck" / "builtin_rules" / "default.yaml"
 
@@ -46,14 +46,7 @@ def hmac_env(monkeypatch):
 
 
 def _pdf(path: Path, lines: list[str]) -> Path:
-    doc = pymupdf.open()
-    page = doc.new_page(width=595, height=842)
-    y = 40
-    for line in lines:
-        page.insert_text((40, y), line)
-        y += 20
-    doc.save(path)
-    return path
+    return write_pdf(path, lines)
 
 
 class TestLatestIndexRows:

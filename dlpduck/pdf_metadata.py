@@ -19,24 +19,27 @@ declared metadata, and a potential source of quiet data leaks.
 
 from __future__ import annotations
 
-import pymupdf
+import pypdfium2 as pdfium
 
-# PyMuPDF's Info-dictionary key -> our metadata field name.
+from dlpduck.pdfium import PDFIUM_LOCK, open_document
+
+# PDF Info-dictionary key -> our metadata field name.
 _FIELDS = {
-    "title": "pdf_title",
-    "author": "pdf_author",
-    "subject": "pdf_subject",
-    "creator": "pdf_creator",
-    "producer": "pdf_producer",
-    "creationDate": "pdf_created_at",
-    "modDate": "pdf_modified_at",
+    "Title": "pdf_title",
+    "Author": "pdf_author",
+    "Subject": "pdf_subject",
+    "Creator": "pdf_creator",
+    "Producer": "pdf_producer",
+    "CreationDate": "pdf_created_at",
+    "ModDate": "pdf_modified_at",
 }
 
 
 def extract_pdf_metadata(pdf_bytes: bytes) -> dict[str, str]:
-    try:
-        doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
-    except Exception:
-        return {}  # unreadable here is not fatal — extraction proper will fail closed later
-    raw = doc.metadata or {}
-    return {out_key: raw[in_key] for in_key, out_key in _FIELDS.items() if raw.get(in_key)}
+    with PDFIUM_LOCK:
+        try:
+            with open_document(pdf_bytes) as document:
+                raw = document.get_metadata_dict(skip_empty=True)
+        except pdfium.PdfiumError:
+            return {}  # unreadable here is not fatal — extraction proper will fail closed later
+        return {out_key: raw[in_key] for in_key, out_key in _FIELDS.items() if raw.get(in_key)}

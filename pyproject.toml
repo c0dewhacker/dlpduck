@@ -7,7 +7,6 @@ license-files = ["LICENSE"]
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-  "pymupdf>=1.24",
   "rapidocr-onnxruntime>=1.3",
   "pyarrow>=17.0",
   "pydantic>=2.10",
@@ -29,6 +28,7 @@ dependencies = [
   # every clean install.
   "httpx>=0.28.1",
   "regex>=2026.9.3",
+  "pypdfium2>=5.13.0",
 ]
 
 [project.scripts]
@@ -46,9 +46,11 @@ dev = [
   "hypothesis>=6.100",
   "mypy>=2.3.1",
   "pip-audit>=2.10.1",
+  "pypdf>=6.18.0",
   "pytest>=8.3",
   "pytest-cov>=7.1",
   "pytest-xdist>=3.8.0",
+  "reportlab>=5.0.1",
   "ruff>=0.16.6",
 ]
 
@@ -88,7 +90,7 @@ ignore = [
 
 [tool.mypy]
 python_version = "3.12"
-ignore_missing_imports = true          # pymupdf, rapidocr and duckdb ship no stubs
+ignore_missing_imports = true          # pypdfium2, rapidocr and duckdb ship no stubs
 # union-attr is excluded, not silenced case by case. It reports one thing:
 # JobContext.text is Optional (it is set once extraction completes), and
 # every consumer downstream of commit reads it unconditionally. That

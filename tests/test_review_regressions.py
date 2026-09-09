@@ -4,7 +4,6 @@ from datetime import timedelta
 from pathlib import Path
 from unittest.mock import Mock
 
-import pymupdf
 import pytest
 from pydantic import ValidationError
 
@@ -17,6 +16,7 @@ from dlpduck.index import AssessmentExists
 from dlpduck.pipeline import Pipeline
 from dlpduck.reprocess import Reprocessor, latest_index_rows
 from dlpduck.types import DocumentText, TextLine
+from tests.pdf_factory import blank_pdf, make_pdf
 
 
 def document(text):
@@ -41,11 +41,8 @@ def pipeline(tmp_path, monkeypatch):
 
 
 def ingest(pipeline, text="An ordinary document with enough native text."):
-    pdf = pymupdf.open()
-    pdf.new_page().insert_text((40, 40), text)
     path = pipeline.config.source.path / "Recognizable name.pdf"
-    path.write_bytes(pdf.tobytes())
-    pdf.close()
+    path.write_bytes(make_pdf([[text]]))
     return pipeline.run_job(path, None, pipeline.config.destination.work_dir / "_processing")
 
 
@@ -148,10 +145,8 @@ def test_duplicate_cleanup_does_not_unlink_a_replacement(pipeline, monkeypatch):
 
 
 def test_recovery_keeps_original_date_and_does_not_repeat_completion(pipeline, monkeypatch):
-    pdf = pymupdf.open()
-    pdf.new_page().insert_text((40, 40), "A document with enough ordinary native text")
     path = pipeline.config.source.path / "original.pdf"
-    path.write_bytes(pdf.tobytes())
+    path.write_bytes(make_pdf([["A document with enough ordinary native text"]]))
     staging = pipeline.config.destination.work_dir / "_processing"
     ctx = pipeline.claim(path, None, staging)
     ctx.received_at -= timedelta(days=1)
@@ -230,19 +225,20 @@ def test_nonpositive_processing_limits_rejected(pipeline, section, field, value)
 
 def test_empty_page_in_multpage_document_is_incomplete(monkeypatch):
     extractor = LineExtractor()
-    pdf = pymupdf.open()
-    pdf.new_page()
-    pdf.new_page()
     calls = iter([(["ordinary native text"], "native", None), ([], "ocr", None)])
     monkeypatch.setattr(extractor, "_page_rows", lambda _: next(calls))
-    assert extractor.extract(pdf.tobytes()).degraded
+    assert extractor.extract(blank_pdf([(595, 842), (595, 842)])).degraded
 
 
 def test_native_heading_does_not_skip_image_ocr(monkeypatch):
     extractor = LineExtractor()
     page = Mock()
-    page.get_text.return_value = "Long native heading above an image"
-    page.get_image_info.return_value = [{"width": 100}]
+    text_page = page.get_textpage.return_value
+    text_page.get_text_bounded.return_value = "Long native heading above an image"
+    page.get_rotation.return_value = 0
+    page.get_objects.return_value = [Mock()]
+    bitmap = page.render.return_value
+    bitmap.to_numpy.return_value = Mock()
     monkeypatch.setattr(extractor, "_safe_dpi", lambda _: 150)
     extractor._ocr = Mock(return_value=([([[0, 0], [100, 0], [100, 20], [0, 20]], "SECRET", .99)], None))
     rows, source, _ = extractor._page_rows(page)
@@ -255,10 +251,8 @@ def test_metadata_symlink_is_never_read(pipeline, tmp_path):
     target.write_text("<metadata><department>secret</department></metadata>")
     companion = pipeline.config.source.path / "Recognizable name.xml"
     companion.symlink_to(target)
-    pdf = pymupdf.open()
-    pdf.new_page().insert_text((40, 40), "An ordinary document with native text")
     source = pipeline.config.source.path / "Recognizable name.pdf"
-    source.write_bytes(pdf.tobytes())
+    source.write_bytes(make_pdf([["An ordinary document with native text"]]))
 
     ctx = pipeline.run_job(
         source,
@@ -281,7 +275,5 @@ def test_isolated_worker_timeout_is_reported(monkeypatch):
 
 
 def test_isolated_worker_reads_real_pdf():
-    pdf = pymupdf.open()
-    pdf.new_page().insert_text((40, 40), "Native document through an isolated worker")
-    result = extract_isolated(pdf.tobytes(), 150, 20, 20)
+    result = extract_isolated(make_pdf([["Native document through an isolated worker"]]), 150, 20, 20)
     assert "isolated worker" in result.full_text
