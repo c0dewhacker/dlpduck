@@ -108,6 +108,15 @@ jobs:
       - name: Smoke-test the image — CLI, watcher role, console role
         run: |
           set -euo pipefail
+          image_bytes="$(docker image inspect dlpduck:ci --format '{{.Size}}')"
+          max_bytes=$((800 * 1024 * 1024))
+          echo "Image size: $((image_bytes / 1024 / 1024)) MiB"
+          [ "$image_bytes" -le "$max_bytes" ] || {
+            echo "::error::Docker image exceeds the 800 MiB size budget"
+            exit 1
+          }
+          docker run --rm --entrypoint python dlpduck:ci -c \
+            'from importlib.metadata import version; assert version("opencv-python-headless"); import cv2; print("OpenCV", cv2.__version__)'
           workdir="$(mktemp -d)"
           mkdir -p "$workdir"/srv/{drops,archive,quarantine,work,audit}
           chmod -R o+rwX "$workdir"
