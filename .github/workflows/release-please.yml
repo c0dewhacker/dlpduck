@@ -2,7 +2,8 @@ name: Release Please
 
 # Conventional commits on main are collected into a release PR. Merging that
 # PR creates the GitHub release, then this workflow builds and attaches the
-# wheel and source distribution using the version from the release tag.
+# wheel and source distribution using the version from the release tag, and
+# builds and pushes the Docker image.
 on:
   push:
     branches: [main]
@@ -27,6 +28,7 @@ jobs:
     outputs:
       release_created: ${{ github.event_name == 'workflow_dispatch' || steps.release.outputs.release_created }}
       tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || steps.release.outputs.tag_name }}
+      pr: ${{ steps.release.outputs.pr }}
     steps:
       - name: Open or update the release PR
         id: release
@@ -36,6 +38,41 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+  sync-lockfile:
+    name: Sync uv.lock with the release PR's version bump
+    needs: release-please
+    if: needs.release-please.outputs.pr != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ fromJson(needs.release-please.outputs.pr).headBranchName }}
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      # release-please bumps pyproject.toml's [project].version but has no
+      # way to know uv.lock also embeds that version in the dlpduck
+      # package's own lock entry — so every release PR left uv.lock
+      # pointing at the pre-bump version, and `uv sync --locked` (this
+      # workflow's own lint/test/build jobs) failed on every one of them.
+      # Regenerating is simpler and more robust than trying to patch the
+      # version string in place.
+      - name: Regenerate the lockfile
+        run: uv lock
+      - name: Commit if uv.lock changed
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- uv.lock; then
+            echo "uv.lock already matches — nothing to do"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add uv.lock
+          git commit -m "chore: sync uv.lock with the release PR's version bump"
+          git push
 
   build-release:
     name: Build and attach release distributions
@@ -62,3 +99,55 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
         run: gh release upload "$TAG_NAME" dist/* --clobber
+
+  build-image:
+    name: Build and push Docker image
+    needs: release-please
+    # Also skipped (not failed) until DOCKERHUB_USERNAME/DOCKERHUB_TOKEN
+    # exist as repository secrets — see the Login step below.
+    if: needs.release-please.outputs.release_created == 'true' && secrets.DOCKERHUB_USERNAME != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.9.0
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/dlpduck
+          tags: |
+            type=semver,pattern={{version}},value=${{ needs.release-please.outputs.tag_name }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ needs.release-please.outputs.tag_name }}
+            type=semver,pattern={{major}},value=${{ needs.release-please.outputs.tag_name }},enable=${{ !startsWith(needs.release-please.outputs.tag_name, 'v0.') }}
+            type=sha,format=short
+
+      # Credentials aren't in the repository yet — this step (and the push
+      # below) starts working the moment DOCKERHUB_USERNAME/DOCKERHUB_TOKEN
+      # are added as repository secrets; nothing else in this workflow needs
+      # to change.
+      - name: Login to Docker Hub
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.0.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.0.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.0.0
+
+      - name: Build and push
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.0.0
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

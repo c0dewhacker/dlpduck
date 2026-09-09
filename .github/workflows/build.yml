@@ -88,3 +88,83 @@ jobs:
           path: dist/
           if-no-files-found: error
           retention-days: 30
+
+  docker:
+    name: Build Docker image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.0.0
+      - name: Build (not pushed — Docker Hub publish happens on release, see release-please.yml)
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.0.0
+        with:
+          context: .
+          push: false
+          load: true
+          tags: dlpduck:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Smoke-test the image — CLI, watcher role, console role
+        run: |
+          set -euo pipefail
+          workdir="$(mktemp -d)"
+          mkdir -p "$workdir"/srv/{drops,archive,quarantine,work}
+          chmod -R o+rwX "$workdir"
+          cat > "$workdir/config.yaml" <<'YAML'
+          source: {name: ci, path: /srv/drops, metadata_format: none}
+          destination: {archive: /srv/archive, quarantine: /srv/quarantine, work_dir: /srv/work}
+          dlp:
+            rules:
+              - include: builtin:default.yaml
+          console:
+            bind: "0.0.0.0:8080"
+          YAML
+
+          docker run --rm dlpduck:ci --help
+
+          # Every command in here is best-effort — this fires on ANY exit,
+          # including a container already removed a few lines below, and
+          # under `set -e` a failing trap command overwrites an otherwise
+          # successful job's exit code.
+          cleanup() {
+            docker logs dlpduck-console-ci 2>/dev/null || true
+            docker logs dlpduck-watch-ci 2>/dev/null || true
+            docker rm -f dlpduck-console-ci dlpduck-watch-ci >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          docker run -d --name dlpduck-console-ci \
+            -e DLPDUCK_HMAC_KEY=ci-only-not-a-real-key \
+            -e DLPDUCK_SESSION_SECRET=ci-only-not-a-real-secret \
+            -v "$workdir/config.yaml:/etc/dlpduck/config.yaml:ro" \
+            -v "$workdir/srv/drops:/srv/drops" -v "$workdir/srv/archive:/srv/archive" \
+            -v "$workdir/srv/quarantine:/srv/quarantine" -v "$workdir/srv/work:/srv/work" \
+            -p 8080:8080 dlpduck:ci console run --config /etc/dlpduck/config.yaml
+          for _ in $(seq 1 30); do
+            if curl -fsS -o /dev/null http://127.0.0.1:8080/login; then break; fi
+            sleep 1
+          done
+          curl -fsS -o /dev/null http://127.0.0.1:8080/login
+          docker rm -f dlpduck-console-ci >/dev/null 2>&1 || true
+
+          docker run -d --name dlpduck-watch-ci \
+            -e DLPDUCK_HMAC_KEY=ci-only-not-a-real-key \
+            -v "$workdir/config.yaml:/etc/dlpduck/config.yaml:ro" \
+            -v "$workdir/srv/drops:/srv/drops" -v "$workdir/srv/archive:/srv/archive" \
+            -v "$workdir/srv/quarantine:/srv/quarantine" -v "$workdir/srv/work:/srv/work" \
+            dlpduck:ci run --config /etc/dlpduck/config.yaml
+          printf '%%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]>>endobj\ntrailer<</Root 1 0 R>>\n' > "$workdir/srv/drops/smoke.pdf"
+          # Archived/quarantined files land under a bind mount owned by the
+          # container's non-root uid, which the runner user can't read back —
+          # check the watcher's own log line for the disposition instead.
+          processed=""
+          for _ in $(seq 1 20); do
+            if docker logs dlpduck-watch-ci 2>&1 | grep -qE 'job [0-9a-f]+ -> (archive|quarantine)'; then
+              processed=1
+              break
+            fi
+            sleep 1
+          done
+          docker logs dlpduck-watch-ci
+          [ -n "$processed" ] || { echo "::error::watcher role did not process the dropped PDF"; exit 1; }

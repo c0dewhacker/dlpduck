@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import tempfile
 from pathlib import Path
@@ -9,6 +10,7 @@ from pathlib import Path
 from dlpduck.content import validate_job_id
 from dlpduck.durability import copy_durably, write_atomically
 from dlpduck.operations import serialized
+from dlpduck.types import DocumentTooLarge, UnsafeSourceFile
 
 
 class FailureQueue:
@@ -99,10 +101,36 @@ class FailureQueue:
         self.pipeline.audit.append(
             "job.retry_requested", job_id=job_id, actor=actor, reason=reason, kind=kind
         )
+        metadata_path = folder / "metadata.json"
+        original_name = "document.pdf"
+        if metadata_path.is_file():
+            try:
+                original_name = json.loads(metadata_path.read_text()).get("source_name", original_name)
+            except ValueError:
+                pass
         with tempfile.TemporaryDirectory(dir=self.root, prefix="retry-") as directory:
-            source = Path(directory) / "document.pdf"
+            source = Path(directory) / original_name
+            original_stat = pdf.stat()
             copy_durably(pdf, source)
-            ctx = self.pipeline.run_job(source, None, self.root / "_processing")
+            # reject_at_claim() derives its job id from name/size/mtime (a
+            # claim-time refusal is exactly a refusal to read content), on
+            # the documented promise that a file rejected twice lands in
+            # one place. Its "name" is the name the file had when it was
+            # first claimed (metadata.json's source_name) — this folder's
+            # own document.pdf is renamed on the way in — and
+            # copy_durably() gives the staged copy a fresh mtime. Either
+            # one drifting would silently break that promise: an oversized
+            # file retried twice would mint two different ids and orphan a
+            # duplicate failed/ folder on every attempt. Restoring both
+            # keeps the fingerprint, and so the folder, stable.
+            os.utime(source, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+            try:
+                ctx = self.pipeline.run_job(source, None, self.root / "_processing")
+            except (DocumentTooLarge, UnsafeSourceFile):
+                # Same refusal as before — reject_at_claim already routed
+                # it back to this folder (same fingerprint) with the
+                # failure reason refreshed; nothing else to do here.
+                raise ValueError("The retry failed again; the failure reason has been updated") from None
         if ctx.disposition == "failed":
             raise ValueError("The retry failed again; the failure reason has been updated")
         self.pipeline.audit.append(

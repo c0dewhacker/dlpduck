@@ -5,9 +5,28 @@
 <p class="note">Unassessed and interrupted documents stay contained here. Retry after correcting the cause, or mark an item resolved with a reason. Resolving retains its file.</p>
 {% if flash %}<div class="card card--info" role="status">{{ flash }}</div>{% endif %}
 {% if not items %}<div class="card">No {{ 'resolved' if resolved else 'open' }} items.</div>{% endif %}
+
+{% if not resolved and items %}
+{# Bulk retry submits to its own form; each item's checkbox below points
+   at it via the `form` attribute rather than nesting, since a checkbox
+   also has to live inside that item's own per-item retry/resolve form. #}
+<form id="bulk-retry-form" method="post" action="/failed/bulk-retry"></form>
+<div class="card queue-actions">
+  <label class="checkbox-row"><input type="checkbox" id="failed-select-all">Select all on this page</label>
+  <label for="bulk-retry-reason">Reason for action</label>
+  <input id="bulk-retry-reason" name="reason" form="bulk-retry-form" required maxlength="1000" style="flex:1;min-width:200px;">
+  <label class="checkbox-row"><input type="checkbox" name="confirm_delivery" value="true" form="bulk-retry-form">I understand retrying delivery-uncertain items may send them twice.</label>
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}" form="bulk-retry-form">
+  <button class="btn btn-primary" type="submit" form="bulk-retry-form">Retry selected</button>
+</div>
+{% endif %}
+
 {% for item in items %}
 <article class="card">
-  <h2 class="document-title">{{ item.filename }}</h2>
+  <h2 class="document-title">
+    {% if not resolved and item.safe_pdf %}<input type="checkbox" class="failed-select" name="items" value="{{ item.kind }}:{{ item.job_id }}" form="bulk-retry-form" aria-label="Select {{ item.filename }} for bulk retry">{% endif %}
+    {{ item.filename }}
+  </h2>
   <p><span class="pill failed">{{ item.kind }}</span> {{ item.reason }}</p>
   <p class="note">{{ item.received_at }} · {{ item.job_id[:12] }}</p>
   {% if item.safe_pdf %}<p><a href="/failed/{{ item.kind }}/{{ item.job_id }}/pdf">Download for inspection</a></p>{% endif %}
@@ -26,4 +45,12 @@
 </article>
 {% endfor %}
 {% include "_pagination.html" %}
+
+{% if not resolved and items %}
+<script>
+document.getElementById("failed-select-all").addEventListener("change", function (e) {
+  document.querySelectorAll(".failed-select").forEach(function (cb) { cb.checked = e.target.checked; });
+});
+</script>
+{% endif %}
 {% endblock %}

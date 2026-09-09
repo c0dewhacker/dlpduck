@@ -1,0 +1,36 @@
+# Version control and CI
+.git
+.github
+
+# Python/uv caches and virtualenvs — installed fresh inside the builder stage
+.venv
+__pycache__
+**/__pycache__
+*.pyc
+.mypy_cache
+.ruff_cache
+.pytest_cache
+.hypothesis
+*.egg-info
+
+# Test and coverage artefacts — not part of the shipped package
+tests
+.coverage
+coverage.xml
+
+# Docs and repo-local tooling — not needed inside the image
+docs
+scripts
+.claude
+CONTRIBUTING.md
+SECURITY.md
+
+# Local environment and secrets — never bake into an image
+.env
+.env.*
+!.env.example
+
+# Editor and OS noise
+.DS_Store
+.idea
+.vscode
