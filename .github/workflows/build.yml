@@ -123,6 +123,17 @@ jobs:
 
           docker run --rm dlpduck:ci --help
 
+          # Every command in here is best-effort — this fires on ANY exit,
+          # including a container already removed a few lines below, and
+          # under `set -e` a failing trap command overwrites an otherwise
+          # successful job's exit code.
+          cleanup() {
+            docker logs dlpduck-console-ci 2>/dev/null || true
+            docker logs dlpduck-watch-ci 2>/dev/null || true
+            docker rm -f dlpduck-console-ci dlpduck-watch-ci >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
           docker run -d --name dlpduck-console-ci \
             -e DLPDUCK_HMAC_KEY=ci-only-not-a-real-key \
             -e DLPDUCK_SESSION_SECRET=ci-only-not-a-real-secret \
@@ -130,13 +141,12 @@ jobs:
             -v "$workdir/srv/drops:/srv/drops" -v "$workdir/srv/archive:/srv/archive" \
             -v "$workdir/srv/quarantine:/srv/quarantine" -v "$workdir/srv/work:/srv/work" \
             -p 8080:8080 dlpduck:ci console run --config /etc/dlpduck/config.yaml
-          trap 'docker logs dlpduck-console-ci; docker rm -f dlpduck-console-ci dlpduck-watch-ci 2>/dev/null || true' EXIT
           for _ in $(seq 1 30); do
             if curl -fsS -o /dev/null http://127.0.0.1:8080/login; then break; fi
             sleep 1
           done
           curl -fsS -o /dev/null http://127.0.0.1:8080/login
-          docker rm -f dlpduck-console-ci
+          docker rm -f dlpduck-console-ci >/dev/null 2>&1 || true
 
           docker run -d --name dlpduck-watch-ci \
             -e DLPDUCK_HMAC_KEY=ci-only-not-a-real-key \
