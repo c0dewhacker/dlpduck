@@ -29,8 +29,17 @@ def _normalize(raw: str) -> str:
     does not (ß and SS are the same value). Then keep alphanumerics of any
     script and drop the formatting — "4111 1111" and "4111-1111" are one
     card number.
+
+    One casefold gap needs a manual patch: Turkish dotless "ı" (U+0131) is
+    str.upper()'s target for plain "i" (Unicode's simple, locale-independent
+    uppercase mapping treats them as a pair), but casefold() does not fold
+    it back to "i" — that mapping is marked Turkish-locale-only ('T') in
+    CaseFolding.txt, and casefold() applies only the common/full ('C'/'F')
+    entries. Left alone, "ı" and its own naive uppercase "I" normalise to
+    two different strings and silently fail to correlate. Folded here as a
+    correlation heuristic, not a claim that ı and i are the same letter.
     """
-    folded = unicodedata.normalize("NFKC", raw).casefold()
+    folded = unicodedata.normalize("NFKC", raw).casefold().replace("ı", "i")
     return "".join(c for c in folded if c.isalnum())
 
 
