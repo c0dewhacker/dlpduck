@@ -42,8 +42,7 @@ documents under new rules, approve releases, and purge retained content.
 | Evidential history | Keeps append-only assessments and a verifiable, hash-chained audit log |
 
 > [!NOTE]
-> DLPDuck is pre-1.0. Pin a revision in production and follow
-> [SECURITY.md](SECURITY.md).
+> DLPDuck is pre-1.0. Pin a version in production.
 
 ---
 
@@ -55,60 +54,24 @@ documents under new rules, approve releases, and purge retained content.
 - [Quick start](#quick-start)
 - [Configuration](#configuration)
 - [Writing rules](#writing-rules)
-- [The two stores, and what purge actually deletes](#the-two-stores-and-what-purge-actually-deletes)
-- [The audit trail](#the-audit-trail)
+- [Storage, purge, and maintenance](#storage-purge-and-maintenance)
+- [Audit trail](#audit-trail)
 - [Admin console](#admin-console)
 - [CLI reference](#cli-reference)
 - [Writing plugins](#writing-plugins)
-- [Security notes](#security-notes)
-- [Development](#development)
 
 ---
 
 ## How it works
 
-```
-   drop folder
-        │
-        │  1. watch — wait for the file to stop growing
-        ▼
-   ┌─────────┐
-   │  claim  │  move into a job-scoped staging dir; job_id = blake2b(pdf bytes)
-   └────┬────┘  refuse symlinks; enforce max_bytes
-        ▼
-   ┌─────────┐
-   │ extract │  per page: native text when sufficient; OCR sparse/image pages
-   └────┬────┘  OCR boxes are clustered into visual rows, not raw top-edge order
-        ▼
-   ┌─────────┐
-   │  scan   │  every rule against every line (or the joined document text)
-   └────┬────┘  masked at match time — the raw value is never stored
-        ▼
-   ┌─────────┐
-   │ enrich  │  enrich-phase plugins run HERE, before routing, so they can
-   └────┬────┘  attach context that changes the decision
-        ▼
-   ┌─────────┐
-   │ dispose │  quarantine if any hit says so, or if extraction was degraded
-   └────┬────┘
-        ▼
-   ┌─────────┐   archive/ or quarantine/   (the PDF)
-   │ commit  │─▶ index/                    (permanent metadata, masked hits)
-   └────┬────┘   content/                  (raw full text — the purgeable part)
-        │        audit/                    (hash-chained JSONL)
-        ▼
-   ┌─────────┐
-   │  emit   │  emit-phase plugins/sinks run last, best-effort, spooled on failure
-   └─────────┘
-```
+1. The watcher waits until a PDF stops changing, then moves it into staging.
+2. Each page uses native text when suitable and OCR when it is sparse or contains images.
+3. Rules inspect lines or the complete document and mask every recorded match.
+4. Enrichment plugins can add routing context before the final decision.
+5. Clean documents enter the archive; matches and incomplete extraction enter quarantine.
+6. DLPDuck writes the PDF, searchable content, assessment index, and audit event before notifying emit plugins.
 
-- **Fail closed.** A degraded page, a rule that exceeds its time budget, or a
-  document with no extractable text all quarantine rather than pass silently —
-  governed by `dlp.quarantine_on_degraded`. A file refused before claim (over
-  `limits.max_bytes`, a symlink) is routed to `failed/` and audited, not left to
-  retry forever.
-- **Never store the raw match.** A hit records a masked form (`••••1111`) plus a
-  keyed HMAC digest for correlation, never the value itself.
+A file that cannot be assessed never passes as clean. Findings contain masked text and a keyed correlation digest, never the raw matched value.
 
 ---
 
@@ -269,7 +232,7 @@ console:
   session_secret_env: DLPDUCK_SESSION_SECRET
   session_max_age_seconds: 28800     # 8h; sessions can be revoked sooner
   session_cookie_secure: false       # set true behind TLS
-  audit_search_terms: hashed         # hashed | plain — see Security notes
+  audit_search_terms: hashed         # hashed avoids storing search queries
   auth:
     max_failed_logins: 10       # then that username/address waits out the lockout
     lockout_seconds: 300
@@ -392,94 +355,38 @@ dlpduck test-rules ./corpus --config config.yaml --rule-id fin.iban
 
 ---
 
-## The two stores, and what purge actually deletes
+## Storage, purge, and maintenance
 
-| | `index/` | `content/` |
+| Store | Contents | Purge behaviour |
 |---|---|---|
-| Holds | metadata, disposition, **masked** hits | raw `full_text` + structured lines |
-| Rows | one per **assessment** (append-only history) | one per job (no history) |
-| Purge deletes it? | **never** | yes — that's what a purge *is* |
+| `index/` | Metadata, disposition, and masked findings | Retained as assessment history |
+| `content/` | Searchable raw text and structured lines | Deleted by purge |
+| `archive/` and `quarantine/` | Original PDFs | Deleted only by hard purge or retention |
 
 ```bash
-dlpduck purge-content <job_id>            # soft purge: content gone, PDF and index row survive
-dlpduck purge-content <job_id> --hard     # hard purge: also deletes the archived PDF
-```
-
-Neither rewrites history — a purge appends one new audit event describing itself.
-
-`dt=` partitions (archive, index, content, audit) are named by **UTC date**, and
-the console's date filters mean UTC days too. `dlpduck reindex` (rebuilds the
-index from the archived PDFs) refuses to re-create content for a job the audit
-trail shows was purged — the row comes back marked `content-withheld` instead.
-Restoring that text is a deliberate `dlpduck reprocess --mode extract`, never a
-side effect of recovery.
-
-### Keeping the index fast
-
-One small Parquet file per assessment makes writes atomic, but DuckDB opens
-every file in the glob on read — the jobs list and Overview counters slow down
-linearly with total documents ingested. Measured on 20,000 single-row
-assessments:
-
-| | files | index size | jobs-list query |
-|---|---|---|---|
-| before | 20,000 | 180.4 MB | 2.64 s |
-| after  | 1 | 0.5 MB | 0.02 s |
-
-```bash
-dlpduck compact-index --config config.yaml            # what it would merge
+dlpduck purge-content <job_id>            # delete extracted content
+dlpduck purge-content <job_id> --hard     # also delete the original PDF
 dlpduck compact-index --config config.yaml --commit
+dlpduck reindex --config config.yaml --commit
 ```
 
-Run it from cron. Safe against a live system and safe to interrupt — today's
-partition is never touched.
+Stores use UTC `dt=YYYY-MM-DD` partitions. Configure retention per store; unset windows keep data indefinitely. `compact-index` merges completed daily index partitions, while `reindex` reconstructs missing index rows without restoring content previously recorded as purged.
 
-## The audit trail
+---
 
-`work_dir/audit/dt=YYYY-MM-DD/events.jsonl`, one JSON event per line. With
-`audit.integrity: chained`, each event carries `prev` (the previous event's
-hash) and its own `hash`, so a silent edit is detectable:
+## Audit trail
+
+Audit events live under `work_dir/audit/dt=YYYY-MM-DD/events.jsonl`. With `audit.integrity: chained`, each event links to the previous event so edits are detectable.
 
 ```bash
 dlpduck verify-audit --config config.yaml
-```
-
-Events: `job.completed`, `job.failed`, `job.reassessed`, `job.released`,
-`purge.started`, `content.purged`, `dlp.revealed`, `pdf.viewed`, `pdf.downloaded`,
-`ui.search`, `reprocess.started`, `reprocess.completed`, `index.rebuilt`,
-`retention.started`, `retention.applied`, `metadata.rejected`, `plugin.failed`,
-`audit.redacted`, `auth.succeeded`, `auth.failed`, `auth.throttled`, `auth.logout`.
-
-### Redacting a single event
-
-Retention deletes whole partitions; sometimes one field in one event needs to
-go instead (an erasure request naming a search term, say):
-
-```bash
 dlpduck redact-audit --config config.yaml \
   --seq 4182 --field query --reason "erasure request 41"
 ```
 
-Empties the named field(s) in place (leaving `[redacted]`) without breaking the
-chain — `seq`, `ts`, `event`, `prev` and `hash` can't be redacted. The removal
-is itself a chained `audit.redacted` event naming who and why; `verify-audit`
-reports every redaction even on an otherwise-clean chain.
-
-Irreversible operations record intent before acting and outcome after
-(`purge.started` → `content.purged`, `retention.started` → `retention.applied`),
-fsync'd — a crash mid-operation leaves a visible started-but-not-completed
-record rather than silence.
+Redaction replaces selected event fields with `[redacted]`, preserves the chain, and records who performed it and why. Purge and retention record intent before making irreversible changes.
 
 ---
-
-## Behaviour as the archive grows
-
-| Read | Bounded by |
-|---|---|
-| `/audit` | Newest partitions first, page-sized. |
-| A job's timeline | Every partition searched, but undecoded records are rejected by a substring test first. |
-| `/jobs` | Server-side filters, stable 100-row pagination. |
-| Overview counters | Aggregated in DuckDB, not counted in Python. |
 
 ## Admin console
 
@@ -856,150 +763,6 @@ def test_ticket_sink_omits_raw_values():
 ```
 
 ---
-
-## Security notes
-
-- **Symlinks in the drop folder are refused**, not followed.
-- **`max_bytes` is enforced against what's actually read**, not a prior
-  `stat()`; a companion metadata file is bounded by `max_metadata_bytes`.
-- **Untrusted metadata values are length-capped** before they reach the index.
-- **A corrupt audit record is reported, not fatal** — the rest of the trail
-  stays readable and the daemon still starts; `verify-audit` reports the hole.
-- **Oversized pages are rasterised at a reduced dpi**, never at a fixed dpi
-  regardless of declared page size.
-- **Job ids are validated (32 hex chars) before touching the filesystem** —
-  they're interpolated into globs.
-- **Rule ids are constrained** to a safe charset (they end up in audit events,
-  logs, and console markup).
-- **Search is fully parameterised**: query length capped, result limit capped,
-  wall-clock interrupt on the DuckDB connection.
-- **Every rule match is time-bounded** on any thread.
-- **Reveal is verified, not trusted** — it re-derives the value from the
-  recorded position and checks the result reproduces the stored masked form;
-  otherwise it reports nothing rather than an unrelated slice of the document.
-- **The session is rotated at login.**
-- **Sessions are revocable** — logout revokes the token; Access can revoke
-  every session for a user; a role or password-hash change invalidates old
-  sessions.
-- **A `password_hash` that isn't one is rejected at boot.**
-- **Disaster recovery never declassifies** — a rebuilt row takes its
-  disposition from where the PDF is filed, never from re-running today's
-  ruleset. Disagreements are counted and reported for an audited `reprocess`.
-- **The assessment history can't be silently overwritten** — two writers
-  racing for the same sequence number is refused, not resolved by clobbering.
-- **CSRF tokens** are session-bound, required on every mutating form, and
-  compared in constant time over bytes (not characters, which 500s on
-  non-ASCII input).
-- **Malformed input is refused, never a stack trace** — exercised against
-  hostile values across the whole console suite.
-- **Purge requires typing `purge`** in a modal that also collects the reason.
-- **Failed logins are throttled before the password is checked**, per
-  username *and* per client address, with an identical response whether or
-  not the account exists.
-- **Auth outcomes are audited**: `auth.succeeded` (with roles granted),
-  `auth.failed`, `auth.throttled`, `auth.logout` — never the attempted
-  password itself.
-
-**The console makes no outbound requests.** Fonts, stylesheet and images all
-serve from `/static`; a strict CSP (`default-src 'self'`, `frame-ancestors
-'none'`, `object-src 'none'`, `base-uri 'none'`), plus `nosniff`,
-`X-Frame-Options: DENY` and `Referrer-Policy: no-referrer`.
-
-**Deploy behind TLS.** The console binds to `127.0.0.1` and speaks plain HTTP
-by default. Terminate TLS in front and set `console.session_cookie_secure:
-true`.
-
-**Filesystem permissions.** The daemon and console set the process umask from
-`umask` (default `"0077"`, owner-only) before writing anything. Run the daemon
-as a dedicated user; keep `quarantine/` on a separate mount/ACL from `archive/`.
-
-**Known limitations:**
-
-- Rulesets are trusted code — compiled regexes from your config. The per-rule
-  time budget bounds a catastrophic pattern, but test new patterns with
-  `dlpduck test-rules` before deploying.
-- Audit appends are serialised with a `flock` on `work_dir/audit`; on a
-  filesystem without it (some NFSv3 setups) concurrent appenders could
-  interleave — keep `work_dir` on local disk or NFSv4.
-- Reporting a vulnerability: please open a private security advisory rather
-  than a public issue.
-
----
-
-## Development
-
-CI (`.github/workflows/ci.yml`) runs the lint and the suite on every push and
-PR, validates the shipped example config, and — separately — builds the wheel,
-installs it into a clean environment with no dev dependencies, and runs the
-quick start against it. See [CONTRIBUTING.md](CONTRIBUTING.md).
-
-```bash
-uv sync
-uv run pytest -q                       # full suite (~6 min; OCR is the slow part)
-uv run pytest -q tests/test_engine.py  # one module
-uv run ruff check .                    # lint — clean, and expected to stay that way
-```
-
-```bash
-uv run python scripts/mutation_test.py           # all of them (~20 min)
-uv run python scripts/mutation_test.py -k audit  # just the audit ones
-```
-
-Test modules worth knowing about beyond line coverage:
-
-| Module | Covers |
-|---|---|
-| `scripts/mutation_test.py` | Checks the *tests*, not the code — 22 hand-picked bugs applied to safety-critical predicates (reveal an unasked-for tail, accept a broken audit link, write purged content back, grant every permission). All 22 caught; run after touching anything on that list. |
-| `tests/test_properties.py` | Hypothesis over the invariants the design rests on: masking never reproduces a value, a hit's offsets always point at what it matched, correlation is keyed and stable. |
-| `tests/test_concurrency.py` | Properties that only fail with more than one writer — the audit chain under parallel appends and across real processes, the assessment-history guard under contention. |
-| `tests/test_malformed_pdfs.py` | Broken, hostile and merely awkward documents — nothing unreadable reaches the clean archive. |
-| `tests/test_scale.py` | Unbounded-by-nature reads (audit browser, job timeline, job list, Overview counters), asserted on work done rather than wall-clock. |
-| `tests/test_schema_evolution.py` | An index written by an older release must still read. |
-| `tests/test_ocr_integration.py` | The path the product exists for — real OCR, end to end into a quarantine decision. |
-
-`ruff format` is deliberately *not* enforced: several comments here are prose that
-wraps where it reads best. Match the surrounding style rather than reformatting.
-
-Layout:
-
-```
-dlpduck/
-  watcher.py      drop-folder polling and stability detection
-  pipeline.py     claim → process → dispose → commit
-  extract.py      per-page native/OCR extraction, row clustering
-  engine.py       rule evaluation
-  rules.py        rule parsing/compilation
-  validators.py   luhn / iban / nhs checksums
-  masking.py      mask() and correlate()
-  index.py        metadata store writes
-  content.py      content store writes, reads, purge
-  search.py       DuckDB join across both stores
-  reprocess.py    reassessment history, release
-  reindex.py      disaster recovery
-  retention.py    partition-level deletion
-  audit.py        hash-chained JSONL
-  plugins/        base, loader, sinks, enrich, spool
-  console/        FastAPI app, auth, RBAC, CSRF, templates
-```
-
-Tests mirror that layout in `tests/`. New behaviour needs a test; security
-boundaries (job id validation, symlink refusal, RBAC, CSRF) need one that proves
-the *negative* case too.
-
----
-
-## Reporting a vulnerability
-
-Please don't open a public issue. [SECURITY.md](SECURITY.md) has the private
-reporting route, and — more usefully — states which properties count as
-vulnerabilities, which don't (config is trusted input; plugins run in-process),
-and the risks that are knowingly accepted and documented.
-
-## Contributing
-
-[CONTRIBUTING.md](CONTRIBUTING.md) covers the setup, the one principle worth
-internalising before changing anything, and which test module covers the things
-line coverage cannot see.
 
 ## Licence
 
