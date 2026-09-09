@@ -21,6 +21,11 @@ from dlpduck.reprocess import Reprocessor, latest_index_rows
 
 DEFAULT_RULES_PATH = Path(__file__).resolve().parents[1] / "dlpduck" / "builtin_rules" / "default.yaml"
 PASSWORD = "correct horse battery staple"
+# Password hashing deliberately uses production-cost Argon2 parameters. The
+# console fixture is rebuilt for every test to isolate its files and sessions,
+# but recomputing the same four hashes each time only burns CPU. One salted,
+# valid hash can safely be shared by these fixed test accounts.
+PASSWORD_HASH = hash_password(PASSWORD)
 
 
 def _pdf(path: Path, lines: list[str]) -> Path:
@@ -48,14 +53,15 @@ def env(tmp_path, monkeypatch):
                 "quarantine": str(tmp_path / "quarantine"),
                 "work_dir": str(tmp_path / "work"),
             },
+            "extraction": {"isolate_worker": False, "native_min_chars": 0},
             "dlp": {"rules": [{"include": str(DEFAULT_RULES_PATH)}]},
             "console": {
                 "auth": {
                     "users": [
-                        {"username": "viewer1", "password_hash": hash_password(PASSWORD), "role": "viewer"},
-                        {"username": "inv1", "password_hash": hash_password(PASSWORD), "role": "investigator"},
-                        {"username": "aud1", "password_hash": hash_password(PASSWORD), "role": "auditor"},
-                        {"username": "admin1", "password_hash": hash_password(PASSWORD), "role": "dlp_admin"},
+                        {"username": "viewer1", "password_hash": PASSWORD_HASH, "role": "viewer"},
+                        {"username": "inv1", "password_hash": PASSWORD_HASH, "role": "investigator"},
+                        {"username": "aud1", "password_hash": PASSWORD_HASH, "role": "auditor"},
+                        {"username": "admin1", "password_hash": PASSWORD_HASH, "role": "dlp_admin"},
                     ]
                 }
             },
@@ -105,11 +111,12 @@ def env_with_metadata(tmp_path, monkeypatch):
                 "quarantine": str(tmp_path / "quarantine"),
                 "work_dir": str(tmp_path / "work"),
             },
+            "extraction": {"isolate_worker": False, "native_min_chars": 0},
             "dlp": {"rules": [{"include": str(DEFAULT_RULES_PATH)}]},
             "console": {
                 "auth": {
                     "users": [
-                        {"username": "admin1", "password_hash": hash_password(PASSWORD), "role": "dlp_admin"},
+                        {"username": "admin1", "password_hash": PASSWORD_HASH, "role": "dlp_admin"},
                     ]
                 }
             },
@@ -1237,7 +1244,7 @@ class TestRevealIsVerifiedAgainstTheRecordedMask:
                         "users": [
                             {
                                 "username": "admin1",
-                                "password_hash": hash_password(PASSWORD),
+                                "password_hash": PASSWORD_HASH,
                                 "role": "dlp_admin",
                             }
                         ]
@@ -1361,9 +1368,9 @@ class TestPendingReleaseStillCountsAsQuarantined:
                     "console": {
                         "auth": {
                             "users": [
-                                {"username": "inv1", "password_hash": hash_password(PASSWORD),
+                                {"username": "inv1", "password_hash": PASSWORD_HASH,
                                  "role": "investigator"},
-                                {"username": "admin1", "password_hash": hash_password(PASSWORD),
+                                {"username": "admin1", "password_hash": PASSWORD_HASH,
                                  "role": "dlp_admin"},
                             ]
                         }

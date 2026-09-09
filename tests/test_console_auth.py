@@ -10,12 +10,13 @@ from dlpduck.console.auth import (
 )
 
 DEFAULT_RULES_PATH = Path(__file__).resolve().parents[1] / "dlpduck" / "builtin_rules" / "default.yaml"
+STORE_PASSWORD_HASH = hash_password("correct horse battery staple")
 
 
 def _store(**overrides) -> LocalUserStore:
     user = {
         "username": "alice",
-        "password_hash": hash_password("correct horse battery staple"),
+        "password_hash": STORE_PASSWORD_HASH,
         "roles": ["investigator"],
     }
     user.update(overrides)

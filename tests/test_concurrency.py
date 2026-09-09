@@ -48,6 +48,7 @@ def config(tmp_path, monkeypatch):
                 "quarantine": str(tmp_path / "quarantine"),
                 "work_dir": str(tmp_path / "work"),
             },
+            "extraction": {"isolate_worker": False, "native_min_chars": 0},
             "dlp": {"rules": [{"include": str(DEFAULT_RULES_PATH)}]},
         }
     )

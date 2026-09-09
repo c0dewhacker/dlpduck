@@ -35,6 +35,7 @@ def _base_config_dict(tmp_path: Path, rules: list[dict]) -> dict:
             "quarantine": str(tmp_path / "quarantine"),
             "work_dir": str(tmp_path / "work"),
         },
+        "extraction": {"isolate_worker": False, "native_min_chars": 0},
         "dlp": {"rules": rules},
     }
 

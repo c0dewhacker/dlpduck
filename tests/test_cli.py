@@ -38,6 +38,9 @@ destination:
   archive: {tmp_path / "archive"}
   quarantine: {tmp_path / "quarantine"}
   work_dir: {tmp_path / "work"}
+extraction:
+  isolate_worker: false
+  native_min_chars: 0
 dlp:
   rules:
     - include: {DEFAULT_RULES_PATH}

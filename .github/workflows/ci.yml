@@ -62,10 +62,10 @@ jobs:
         run: uv sync --locked --python "${{ matrix.python-version }}"
       - name: Run tests
         if: ${{ !matrix.coverage }}
-        run: uv run pytest -q
+        run: uv run pytest -q -n 2 --dist=loadscope
       - name: Run tests with coverage
         if: ${{ matrix.coverage }}
-        run: uv run pytest -q --cov=dlpduck --cov-report=term --cov-report=xml
+        run: uv run pytest -q -n 2 --dist=loadscope --cov=dlpduck --cov-report=term --cov-report=xml
       - name: Upload coverage
         if: ${{ matrix.coverage && always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

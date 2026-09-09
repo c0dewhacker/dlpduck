@@ -30,6 +30,9 @@ def config(tmp_path, monkeypatch):
                 "quarantine": str(tmp_path / "quarantine"),
                 "work_dir": str(tmp_path / "work"),
             },
+            # These tests exercise pipeline behavior with native-text PDFs.
+            # OCR and process isolation have dedicated integration tests.
+            "extraction": {"isolate_worker": False, "native_min_chars": 0},
             "dlp": {"rules": [{"include": str(DEFAULT_RULES_PATH)}]},
         }
     )

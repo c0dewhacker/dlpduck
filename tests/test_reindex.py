@@ -35,6 +35,7 @@ def _config(tmp_path: Path) -> Config:
                 "quarantine": str(tmp_path / "quarantine"),
                 "work_dir": str(tmp_path / "work"),
             },
+            "extraction": {"isolate_worker": False, "native_min_chars": 0},
             "dlp": {"rules": [{"include": str(DEFAULT_RULES_PATH)}]},
         }
     )

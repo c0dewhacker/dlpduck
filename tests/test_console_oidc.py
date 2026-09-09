@@ -19,6 +19,8 @@ from dlpduck.pipeline import Pipeline
 
 DEFAULT_RULES_PATH = Path(__file__).resolve().parents[1] / "dlpduck" / "builtin_rules" / "default.yaml"
 PASSWORD = "correct horse battery staple"
+PASSWORD_HASH = hash_password(PASSWORD)
+LOCAL_PASSWORD_HASH = hash_password("x")
 
 
 def _base_config(tmp_path: Path, auth: dict) -> dict:
@@ -31,6 +33,7 @@ def _base_config(tmp_path: Path, auth: dict) -> dict:
             "quarantine": str(tmp_path / "quarantine"),
             "work_dir": str(tmp_path / "work"),
         },
+        "extraction": {"isolate_worker": False, "native_min_chars": 0},
         "dlp": {"rules": [{"include": str(DEFAULT_RULES_PATH)}]},
         "console": {"auth": auth},
     }
@@ -66,7 +69,7 @@ def oidc_env(tmp_path, monkeypatch):
                     "client_id": "dlpduck-console",
                 },
                 "users": [
-                    {"username": "breakglass", "password_hash": hash_password(PASSWORD), "role": "dlp_admin"}
+                    {"username": "breakglass", "password_hash": PASSWORD_HASH, "role": "dlp_admin"}
                 ],
             },
         )
@@ -108,7 +111,7 @@ class TestLoginPageOffersSso:
         monkeypatch.setenv("DLPDUCK_HMAC_KEY", "test-key-not-for-production")
         monkeypatch.setenv("DLPDUCK_SESSION_SECRET", "test-session-secret-not-for-production")
         config = Config.model_validate(
-            _base_config(tmp_path, {"users": [{"username": "a", "password_hash": hash_password("x"), "role": "viewer"}]})
+            _base_config(tmp_path, {"users": [{"username": "a", "password_hash": LOCAL_PASSWORD_HASH, "role": "viewer"}]})
         )
         client = TestClient(create_app(config, Pipeline(config)))
         resp = client.get("/login")
@@ -118,7 +121,7 @@ class TestLoginPageOffersSso:
         monkeypatch.setenv("DLPDUCK_HMAC_KEY", "test-key-not-for-production")
         monkeypatch.setenv("DLPDUCK_SESSION_SECRET", "test-session-secret-not-for-production")
         config = Config.model_validate(
-            _base_config(tmp_path, {"users": [{"username": "a", "password_hash": hash_password("x"), "role": "viewer"}]})
+            _base_config(tmp_path, {"users": [{"username": "a", "password_hash": LOCAL_PASSWORD_HASH, "role": "viewer"}]})
         )
         client = TestClient(create_app(config, Pipeline(config)))
         assert client.get("/login/oidc", follow_redirects=False).status_code == 404
