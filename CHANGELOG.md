@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/c0dewhacker/dlpduck/compare/v0.1.1...v0.1.2) (2026-09-09)
+
+
+### Bug Fixes
+
+* secrets context is not valid in a job-level if condition ([b1ff627](https://github.com/c0dewhacker/dlpduck/commit/b1ff6270067bff756191c7139602785418af424d))
+
 ## [0.1.1](https://github.com/c0dewhacker/dlpduck/compare/v0.1.0...v0.1.1) (2026-09-09)
 
 
