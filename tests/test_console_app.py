@@ -9,7 +9,6 @@ import re
 import shutil
 from pathlib import Path
 
-import pymupdf
 import pytest
 from fastapi.testclient import TestClient
 
@@ -18,6 +17,7 @@ from dlpduck.console.app import create_app
 from dlpduck.console.auth import hash_password
 from dlpduck.pipeline import Pipeline
 from dlpduck.reprocess import Reprocessor, latest_index_rows
+from tests.pdf_factory import write_pdf
 
 DEFAULT_RULES_PATH = Path(__file__).resolve().parents[1] / "dlpduck" / "builtin_rules" / "default.yaml"
 PASSWORD = "correct horse battery staple"
@@ -29,14 +29,7 @@ PASSWORD_HASH = hash_password(PASSWORD)
 
 
 def _pdf(path: Path, lines: list[str]) -> Path:
-    doc = pymupdf.open()
-    page = doc.new_page(width=595, height=842)
-    y = 40
-    for line in lines:
-        page.insert_text((40, y), line)
-        y += 20
-    doc.save(path)
-    return path
+    return write_pdf(path, lines)
 
 
 @pytest.fixture

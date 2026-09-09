@@ -75,9 +75,9 @@ matter in your deployment:
   can age out a `content.purged` event while its PDF survives, and a rebuild
   after that has no way to know. Keep the audit window at least as long as the
   document window.
-- **PyMuPDF parses untrusted PDFs.** Parsing and OCR run in a time-bounded worker
+- **PDFium parses untrusted PDFs.** Parsing and OCR run in a time-bounded worker
   process, so a crash or hang cannot take down the long-running daemon. This is
-  process isolation rather than a privilege sandbox; keep PyMuPDF updated and
+  process isolation rather than a privilege sandbox; keep pypdfium2 updated and
   apply OS-level isolation where hostile input is expected.
 
 ## Supported versions

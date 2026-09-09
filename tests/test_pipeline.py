@@ -1,13 +1,13 @@
 from pathlib import Path
 
 import pyarrow.parquet as pq
-import pymupdf
 import pytest
 
 from dlpduck.config import Config
 from dlpduck.content import InvalidJobId
 from dlpduck.pipeline import Pipeline, content_job_id
 from dlpduck.types import UnsafeSourceFile
+from tests.pdf_factory import encrypted_pdf, make_pdf, with_metadata, without_metadata, write_pdf
 
 DEFAULT_RULES_PATH = Path(__file__).resolve().parents[1] / "dlpduck" / "builtin_rules" / "default.yaml"
 
@@ -39,25 +39,11 @@ def config(tmp_path, monkeypatch):
 
 
 def _pdf(path: Path, lines: list[str]) -> Path:
-    doc = pymupdf.open()
-    page = doc.new_page(width=595, height=842)
-    y = 40
-    for line in lines:
-        page.insert_text((40, y), line)
-        y += 20
-    doc.save(path)
-    return path
+    return write_pdf(path, lines)
 
 
 def _pdf_with_metadata(path: Path, lines: list[str], metadata: dict) -> Path:
-    doc = pymupdf.open()
-    doc.set_metadata(metadata)
-    page = doc.new_page(width=595, height=842)
-    y = 40
-    for line in lines:
-        page.insert_text((40, y), line)
-        y += 20
-    doc.save(path)
+    path.write_bytes(with_metadata(make_pdf([lines]), metadata))
     return path
 
 
@@ -203,7 +189,8 @@ class TestPdfDerivedMetadata:
     ):
         config.source.metadata_fields = ["pdf_title", "device_id"]  # allowlist non-empty
         pipeline = Pipeline(config)
-        pdf = _pdf(tmp_path / "plain.pdf", ["nothing declared"])  # no set_metadata call at all
+        pdf = tmp_path / "plain.pdf"
+        pdf.write_bytes(without_metadata(make_pdf([["nothing declared"]])))
         staging = config.destination.work_dir / "_processing"
 
         ctx = pipeline.run_job(pdf, None, staging)
@@ -272,15 +259,8 @@ class TestCrashRecovery:
 class TestFailClosed:
     def test_encrypted_document_is_routed_to_failed(self, tmp_path, config):
         pipeline = Pipeline(config)
-        doc = pymupdf.open()
-        doc.new_page().insert_text((40, 40), "secret")
         enc_path = tmp_path / "encrypted.pdf"
-        doc.save(
-            enc_path,
-            encryption=pymupdf.PDF_ENCRYPT_AES_256,
-            user_pw="hunter2",
-            owner_pw="hunter2admin",
-        )
+        enc_path.write_bytes(encrypted_pdf(make_pdf([["secret"]])))
         staging = config.destination.work_dir / "_processing"
 
         ctx = pipeline.run_job(enc_path, None, staging)

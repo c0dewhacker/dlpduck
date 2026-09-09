@@ -9,11 +9,11 @@ import json
 import shutil
 from pathlib import Path
 
-import pymupdf
 import pytest
 from click.testing import CliRunner
 
 from dlpduck.cli import main
+from tests.pdf_factory import encrypted_pdf, make_pdf, write_pdf
 
 DEFAULT_RULES_PATH = Path(__file__).resolve().parents[1] / "dlpduck" / "builtin_rules" / "default.yaml"
 
@@ -49,14 +49,7 @@ dlp:
 
 
 def _pdf(path: Path, lines: list[str]) -> Path:
-    doc = pymupdf.open()
-    page = doc.new_page(width=595, height=842)
-    y = 40
-    for line in lines:
-        page.insert_text((40, y), line)
-        y += 20
-    doc.save(path)
-    return path
+    return write_pdf(path, lines)
 
 
 def _ingest(env, runner, name="doc.pdf", lines=("An ordinary memo.",)) -> str:
@@ -513,11 +506,8 @@ class TestScanExitCodes:
     able to tell "clean" from "could not assess"."""
 
     def test_an_encrypted_document_exits_nonzero(self, env, runner, tmp_path):
-        doc = pymupdf.open()
-        page = doc.new_page(width=595, height=842)
-        page.insert_text((40, 40), "secret content")
         enc = tmp_path / "encrypted.pdf"
-        doc.save(str(enc), encryption=pymupdf.PDF_ENCRYPT_AES_256, user_pw="hunter2")
+        enc.write_bytes(encrypted_pdf(make_pdf([["secret content"]])))
 
         result = runner.invoke(main, ["scan", str(enc), "--config", str(env["config"])])
 

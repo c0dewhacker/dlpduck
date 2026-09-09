@@ -33,6 +33,7 @@ from dlpduck.index import write_index_row
 from dlpduck.metadata import MetadataParserFactory, allowlist
 from dlpduck.operations import OperationalStore, serialized
 from dlpduck.pdf_metadata import extract_pdf_metadata
+from dlpduck.pdfium import page_count
 from dlpduck.plugins.base import PluginError, PluginRunner
 from dlpduck.rules import ruleset_version
 from dlpduck.types import (
@@ -240,15 +241,15 @@ class Pipeline:
     def process(self, ctx: JobContext) -> None:
         pdf_bytes = ctx.pdf_path.read_bytes()
 
-        doc = pymupdf_open_for_page_count(pdf_bytes)
-        if doc is not None and len(doc) > self.config.limits.max_pages:
+        detected_page_count = page_count(pdf_bytes)
+        if detected_page_count is not None and detected_page_count > self.config.limits.max_pages:
             ctx.disposition = "failed"
             ctx.reason = "page_count_exceeds_limit"
             self.audit.append(
                 "job.failed",
                 job_id=ctx.job_id,
                 reason=ctx.reason,
-                page_count=len(doc),
+                page_count=detected_page_count,
             )
             return
 
@@ -763,12 +764,3 @@ class Pipeline:
                 self.commit(ctx)
             resumed.append(ctx)
         return resumed
-
-
-def pymupdf_open_for_page_count(pdf_bytes: bytes):
-    import pymupdf
-
-    try:
-        return pymupdf.open(stream=pdf_bytes, filetype="pdf")
-    except Exception:
-        return None

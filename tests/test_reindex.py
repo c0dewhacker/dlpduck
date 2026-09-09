@@ -7,7 +7,6 @@ left alone — reindex only fills gaps, never overwrites.
 import shutil
 from pathlib import Path
 
-import pymupdf
 import pytest
 
 from dlpduck.config import Config
@@ -15,6 +14,7 @@ from dlpduck.pipeline import Pipeline
 from dlpduck.reindex import Reindexer, indexed_job_ids
 from dlpduck.reprocess import latest_index_rows
 from dlpduck.search import search
+from tests.pdf_factory import write_pdf
 
 DEFAULT_RULES_PATH = Path(__file__).resolve().parents[1] / "dlpduck" / "builtin_rules" / "default.yaml"
 
@@ -42,14 +42,7 @@ def _config(tmp_path: Path) -> Config:
 
 
 def _pdf(path: Path, lines: list[str]) -> Path:
-    doc = pymupdf.open()
-    page = doc.new_page(width=595, height=842)
-    y = 40
-    for line in lines:
-        page.insert_text((40, y), line)
-        y += 20
-    doc.save(path)
-    return path
+    return write_pdf(path, lines)
 
 
 class TestDiscoverPdfs:

@@ -1,8 +1,10 @@
-import pymupdf
+from unittest.mock import Mock
+
 import pytest
 
 from dlpduck.extract import LineExtractor, _Box
 from dlpduck.types import EncryptedDocument, PageTooLarge
+from tests.pdf_factory import blank_pdf, encrypted_pdf, image_only_pdf, join_pdfs, make_pdf
 
 
 @pytest.fixture(scope="module")
@@ -59,10 +61,7 @@ class TestNativeVsOcrDecision:
     """
 
     def test_native_text_page_is_extracted_without_ocr(self, extractor):
-        doc = pymupdf.open()
-        page = doc.new_page(width=595, height=842)
-        page.insert_text((40, 40), "This is plain native PDF text content.")
-        pdf_bytes = doc.tobytes()
+        pdf_bytes = make_pdf([["This is plain native PDF text content."]])
 
         result = extractor.extract(pdf_bytes)
         assert result.page_count == 1
@@ -71,14 +70,7 @@ class TestNativeVsOcrDecision:
         assert all(ln.source == "native" for ln in result.lines)
 
     def test_image_only_page_falls_back_to_ocr(self, extractor):
-        doc = pymupdf.open()
-        page = doc.new_page(width=400, height=200)
-        page.insert_text((20, 60), "Rasterized Only", fontsize=20)
-        pix = page.get_pixmap(dpi=150)
-        img_doc = pymupdf.open()
-        img_page = img_doc.new_page(width=pix.width, height=pix.height)
-        img_page.insert_image(img_page.rect, pixmap=pix)
-        pdf_bytes = img_doc.tobytes()
+        pdf_bytes = image_only_pdf(["Rasterized Only"], dpi=150, page_size=(400, 200))
 
         result = extractor.extract(pdf_bytes)
         assert result.page_count == 1
@@ -90,18 +82,10 @@ class TestNativeVsOcrDecision:
     def test_mixed_document_extracts_both_pages_correctly(self, extractor):
         # This is the exact v1 bug scenario: native cover page + scanned
         # body page. Page 2 must NOT be silently dropped.
-        doc = pymupdf.open()
-        native_page = doc.new_page(width=595, height=842)
-        native_page.insert_text((40, 40), "Native cover sheet with plenty of real text content.")
-
-        raster_source = pymupdf.open()
-        rp = raster_source.new_page(width=400, height=200)
-        rp.insert_text((20, 60), "Scanned Body Page", fontsize=20)
-        pix = rp.get_pixmap(dpi=150)
-        img_page = doc.new_page(width=pix.width, height=pix.height)
-        img_page.insert_image(img_page.rect, pixmap=pix)
-
-        pdf_bytes = doc.tobytes()
+        pdf_bytes = join_pdfs(
+            make_pdf([["Native cover sheet with plenty of real text content."]]),
+            image_only_pdf(["Scanned Body Page"], dpi=150, page_size=(400, 200)),
+        )
         result = extractor.extract(pdf_bytes)
 
         assert result.page_count == 2
@@ -112,25 +96,24 @@ class TestNativeVsOcrDecision:
         assert page2_lines and all(ln.source == "ocr" for ln in page2_lines)
 
     def test_line_numbers_are_document_global_and_page_relative_indices_reset(self, extractor):
-        doc = pymupdf.open()
-        for i in range(2):
-            page = doc.new_page(width=595, height=842)
-            page.insert_text((40, 40), f"Page {i} first native line of real text.")
-            page.insert_text((40, 60), f"Page {i} second native line of real text.")
-        result = extractor.extract(doc.tobytes())
+        result = extractor.extract(
+            make_pdf(
+                [
+                    [
+                        f"Page {i} first native line of real text.",
+                        f"Page {i} second native line of real text.",
+                    ]
+                    for i in range(2)
+                ]
+            )
+        )
 
         assert [ln.line_number for ln in result.lines] == [0, 1, 2, 3]
         assert [ln.line_on_page for ln in result.lines] == [0, 1, 0, 1]
 
     def test_encrypted_pdf_raises(self, extractor):
-        doc = pymupdf.open()
-        doc.new_page().insert_text((40, 40), "secret")
-        doc.save("/tmp/dlpduck-test-encrypted.pdf", encryption=pymupdf.PDF_ENCRYPT_AES_256,
-                  user_pw="hunter2", owner_pw="hunter2admin")
-        pdf_bytes = open("/tmp/dlpduck-test-encrypted.pdf", "rb").read()
-
         with pytest.raises(EncryptedDocument):
-            extractor.extract(pdf_bytes)
+            extractor.extract(encrypted_pdf(make_pdf([["secret"]])))
 
 
 class TestOversizedPagesAreClamped:
@@ -143,16 +126,16 @@ class TestOversizedPagesAreClamped:
 
     def test_an_ordinary_page_uses_the_configured_dpi(self):
         extractor = LineExtractor(dpi=150)
-        doc = pymupdf.open()
-        page = doc.new_page(width=595, height=842)  # A4
+        page = Mock()
+        page.get_size.return_value = (595, 842)
         assert extractor._safe_dpi(page) == 150
 
     def test_a_large_page_is_scaled_down_rather_than_refused(self):
         """A genuinely big plan drawing still gets read, just coarsely."""
         extractor = LineExtractor(dpi=150)
-        doc = pymupdf.open()
         # 50 inches square: 5,625MP at 150 dpi, but it fits at a lower one.
-        page = doc.new_page(width=50 * 72, height=50 * 72)
+        page = Mock()
+        page.get_size.return_value = (50 * 72, 50 * 72)
         safe = extractor._safe_dpi(page)
 
         assert extractor.MIN_DPI <= safe < 150
@@ -164,9 +147,9 @@ class TestOversizedPagesAreClamped:
         200-inch page was still 52MP, a 20,000-inch one half a trillion
         pixels."""
         extractor = LineExtractor(dpi=150)
-        doc = pymupdf.open()
         for inches in (50, 100, 200, 500, 2000, 20000):
-            page = doc.new_page(width=inches * 72, height=inches * 72)
+            page = Mock()
+            page.get_size.return_value = (inches * 72, inches * 72)
             try:
                 safe = extractor._safe_dpi(page)
             except PageTooLarge:
@@ -176,8 +159,8 @@ class TestOversizedPagesAreClamped:
 
     def test_a_page_that_cannot_fit_even_at_the_floor_is_refused(self):
         extractor = LineExtractor(dpi=150)
-        doc = pymupdf.open()
-        page = doc.new_page(width=20000 * 72, height=20000 * 72)
+        page = Mock()
+        page.get_size.return_value = (20000 * 72, 20000 * 72)
         with pytest.raises(PageTooLarge):
             extractor._safe_dpi(page)
 
@@ -185,19 +168,15 @@ class TestOversizedPagesAreClamped:
         """extract() already treats a page it cannot read as degraded,
         which quarantines the document — fail closed, not fall over."""
         extractor = LineExtractor(dpi=150)
-        doc = pymupdf.open()
-        doc.new_page(width=20000 * 72, height=20000 * 72)  # no text layer -> OCR path
-        buf = doc.tobytes()
-
-        result = extractor.extract(buf)
+        result = extractor.extract(blank_pdf([(20000 * 72, 20000 * 72)]))
 
         assert result.degraded is True
         assert result.lines == []
 
     def test_a_zero_sized_page_does_not_divide_by_zero(self):
         extractor = LineExtractor(dpi=150)
-        doc = pymupdf.open()
-        page = doc.new_page(width=1, height=1)
+        page = Mock()
+        page.get_size.return_value = (1, 1)
         assert extractor._safe_dpi(page) == 150
 
 

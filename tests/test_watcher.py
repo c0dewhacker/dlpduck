@@ -216,16 +216,9 @@ def fast_watcher(tmp_path, monkeypatch):
 
 
 def _real_pdf(path: Path, lines: list[str]) -> Path:
-    import pymupdf
+    from tests.pdf_factory import write_pdf
 
-    doc = pymupdf.open()
-    page = doc.new_page(width=595, height=842)
-    y = 40
-    for line in lines:
-        page.insert_text((40, y), line)
-        y += 20
-    doc.save(path)
-    return path
+    return write_pdf(path, lines)
 
 
 class TestDaemonLoopResilience:
