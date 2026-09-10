@@ -10,7 +10,7 @@ Create a values file containing your secrets and at least one local user or an
 OIDC provider. Generate a local password hash with:
 
 ```bash
-docker run --rm c0dewhacker/dlpduck:0.1.3 console hash-password
+docker run --rm c0dewhacker/dlpduck:latest console hash-password
 ```
 
 ```yaml

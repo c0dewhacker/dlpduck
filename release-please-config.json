@@ -6,6 +6,7 @@
     ".": {
       "package-name": "dlpduck",
       "extra-files": [
+        "dlpduck/__init__.py",
         {
           "type": "yaml",
           "path": "charts/dlpduck/Chart.yaml",

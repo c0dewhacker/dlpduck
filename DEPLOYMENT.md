@@ -14,7 +14,7 @@ watcher may claim files from a drop folder.
 Create a local administrator password hash:
 
 ```bash
-docker run --rm c0dewhacker/dlpduck:0.1.3 console hash-password
+docker run --rm c0dewhacker/dlpduck:latest console hash-password
 ```
 
 Copy `charts/dlpduck/values.yaml` to a private values file. Set the generated

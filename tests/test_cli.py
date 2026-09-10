@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
+from dlpduck import __version__
 from dlpduck.cli import main
 from tests.pdf_factory import encrypted_pdf, make_pdf, write_pdf
 
@@ -21,6 +22,13 @@ DEFAULT_RULES_PATH = Path(__file__).resolve().parents[1] / "dlpduck" / "builtin_
 @pytest.fixture
 def runner():
     return CliRunner()
+
+
+def test_cli_reports_release_version(runner):
+    result = runner.invoke(main, ["--version"])
+
+    assert result.exit_code == 0
+    assert result.output.strip() == f"dlpduck, version {__version__}"
 
 
 @pytest.fixture
