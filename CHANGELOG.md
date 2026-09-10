@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.6](https://github.com/c0dewhacker/dlpduck/compare/v0.1.5...v0.1.6) (2026-09-10)
+
+
+### Features
+
+* dot-path field extraction for nested companion metadata ([9e18ec7](https://github.com/c0dewhacker/dlpduck/commit/9e18ec7b9b6de77be1f0204543f9743b9c729dcd))
+* dot-path field extraction for nested companion metadata ([c8c5631](https://github.com/c0dewhacker/dlpduck/commit/c8c5631bebbc4bcd5ca5ce1b535c0fe1f4279fee))
+
 ## [0.1.5](https://github.com/c0dewhacker/dlpduck/compare/v0.1.4...v0.1.5) (2026-09-10)
 
 

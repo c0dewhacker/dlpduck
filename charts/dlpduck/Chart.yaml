@@ -2,8 +2,8 @@ apiVersion: v2
 name: dlpduck
 description: Local-first OCR and data loss prevention for scanned PDFs
 type: application
-version: 0.1.5
-appVersion: 0.1.5
+version: 0.1.6
+appVersion: 0.1.6
 home: https://github.com/c0dewhacker/dlpduck
 icon: >-
   https://raw.githubusercontent.com/c0dewhacker/dlpduck/main/dlpduck/console/static/mascot.png
