@@ -106,3 +106,57 @@ class TestXmlEntityAttacksAreRefused:
             "device_id": "MFP-3F-04",
             "department": "Finance",
         }
+
+
+class TestNestedDocuments:
+    """Neither parser understands XPath or JSONPath — allowlist()'s
+    dot-path is the whole extraction language. These pin that a grandchild
+    is actually reachable, not silently dropped the way XmlMetadataParser
+    used to drop anything without text of its own.
+    """
+
+    def test_xml_grandchild_is_reachable_by_dot_path(self):
+        content = b"<meta><device><id>MFP-1</id><site>3F</site></device></meta>"
+        raw = XmlMetadataParser().parse(content)
+        assert raw == {"device": {"id": "MFP-1", "site": "3F"}}
+        assert allowlist(raw, ["device.id"]) == {"device.id": "MFP-1"}
+
+    def test_repeated_xml_siblings_collect_into_a_list(self):
+        content = b"<meta><owner>alice</owner><owner>bob</owner></meta>"
+        assert XmlMetadataParser().parse(content) == {"owner": ["alice", "bob"]}
+
+    def test_json_nested_field_is_reachable_by_dot_path(self):
+        raw = JsonMetadataParser().parse(b'{"device": {"id": "MFP-2", "site": "4F"}}')
+        assert allowlist(raw, ["device.id", "device.site"]) == {
+            "device.id": "MFP-2",
+            "device.site": "4F",
+        }
+
+    def test_missing_segment_is_silently_skipped_not_errored(self):
+        raw = {"device": {"id": "MFP-1"}}
+        assert allowlist(raw, ["device.missing", "device.id"]) == {"device.id": "MFP-1"}
+
+    def test_a_path_through_a_non_dict_is_silently_skipped(self):
+        raw = {"device": "MFP-1"}  # not nested — "device.id" has nowhere to descend
+        assert allowlist(raw, ["device.id"]) == {}
+
+    def test_output_stays_flat_keyed_by_the_literal_dotted_path(self):
+        """A dot-path is not reassembled into nested output — the config
+        field name, dots included, is the key a plugin actually reads."""
+        raw = {"device": {"id": "MFP-1"}}
+        result = allowlist(raw, ["device.id"])
+        assert result == {"device.id": "MFP-1"}
+        assert "device" not in result
+
+    def test_a_whole_nested_subtree_can_still_be_kept_without_a_dot_path(self):
+        raw = {"device": {"id": "MFP-1", "site": "3F"}}
+        assert allowlist(raw, ["device"]) == {"device": {"id": "MFP-1", "site": "3F"}}
+
+    def test_an_oversized_nested_subtree_is_truncated_like_a_string_value(self):
+        from dlpduck.metadata import MAX_VALUE_CHARS
+
+        raw = {"device": {"id": "A" * 100_000}}
+        kept = allowlist(raw, ["device"])
+        assert isinstance(kept["device"], str)
+        assert len(kept["device"]) < MAX_VALUE_CHARS + 50
+        assert kept["device"].endswith("[truncated]")

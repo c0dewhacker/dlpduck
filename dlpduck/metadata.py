@@ -47,7 +47,33 @@ class XmlMetadataParser(BaseMetadataParser):
                 "never needed for scanner metadata)"
             )
         root = ET.fromstring(content)  # noqa: S314 — DOCTYPE rejected above
-        return {child.tag: child.text.strip() for child in root if child.text}
+        return self._element_to_dict(root)
+
+    @staticmethod
+    def _element_to_dict(element: ET.Element) -> dict[str, Any]:
+        """Recurse into child elements rather than reading only the root's
+        direct children, so a grandchild is reachable via allowlist()'s
+        dot-path rather than being silently dropped for having no text of
+        its own. Mixed content on a container element is ignored — scanner
+        metadata doesn't have any. Repeated sibling tags collect into a
+        list; single occurrences don't pay that cost.
+        """
+        result: dict[str, Any] = {}
+        for child in element:
+            value: Any = (
+                XmlMetadataParser._element_to_dict(child)
+                if len(child)
+                else (child.text.strip() if child.text else None)
+            )
+            if not value:
+                continue
+            if child.tag not in result:
+                result[child.tag] = value
+            elif isinstance(result[child.tag], list):
+                result[child.tag].append(value)
+            else:
+                result[child.tag] = [result[child.tag], value]
+        return result
 
 
 class JsonMetadataParser(BaseMetadataParser):
@@ -98,10 +124,53 @@ class MetadataParserFactory:
 MAX_VALUE_CHARS = 4096
 
 
+_MISSING = object()
+
+
+def _resolve(raw: dict[str, Any], path: str) -> Any:
+    """A field name is a dot-path (`device.id`) descending through nested
+    dicts — a plain name is just a one-segment path, so an ordinary flat
+    key behaves exactly as it always did. Any segment missing, or found on
+    something that isn't a dict, is "not present", the same as a flat key
+    that never existed.
+    """
+    node: Any = raw
+    for part in path.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return _MISSING
+        node = node[part]
+    return node
+
+
+def _bounded(value: Any) -> Any:
+    if isinstance(value, str):
+        if len(value) > MAX_VALUE_CHARS:
+            return value[:MAX_VALUE_CHARS] + "…[truncated]"
+        return value
+    # A dot-path can keep a whole nested subtree (JSON nesting survives
+    # parsing; XmlMetadataParser now builds one too), and that subtree is
+    # not a str — cap its serialized size too, or an oversized companion
+    # document reaches the permanent index untruncated just because the
+    # kept value's type happens not to be a string.
+    try:
+        serialized = json.dumps(value)
+    except TypeError:
+        serialized = str(value)
+    if len(serialized) > MAX_VALUE_CHARS:
+        return serialized[:MAX_VALUE_CHARS] + "…[truncated]"
+    return value
+
+
 def allowlist(raw: dict[str, Any], fields: list[str]) -> dict[str, Any]:
     """Drop every key not explicitly named. Applied before the value ever
     reaches a JobContext. `filename` is deliberately not in any
     default list; a deployment that wants it has to say so.
+
+    A field name may be a dot-path into a nested document (`device.id`);
+    see `_resolve`. The output is still flat — kept under the literal
+    field name as written in config, dots included, not reassembled into
+    nested structure — so a plugin or template reads `ctx.metadata["device.id"]`
+    exactly as configured, and existing flat-key deployments are unaffected.
 
     Surviving values are also length-capped: the allowlist decides WHICH
     untrusted fields are kept, this decides how much of one is allowed to
@@ -109,10 +178,8 @@ def allowlist(raw: dict[str, Any], fields: list[str]) -> dict[str, Any]:
     """
     kept = {}
     for key in fields:
-        if key not in raw:
+        value = _resolve(raw, key)
+        if value is _MISSING:
             continue
-        value = raw[key]
-        if isinstance(value, str) and len(value) > MAX_VALUE_CHARS:
-            value = value[:MAX_VALUE_CHARS] + "…[truncated]"
-        kept[key] = value
+        kept[key] = _bounded(value)
     return kept

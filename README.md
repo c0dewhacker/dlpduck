@@ -277,9 +277,14 @@ companion file or the PDF's own Info dictionary; an empty list (the default)
 keeps nothing. PDF-derived keys are prefixed `pdf_` (`pdf_title`, `pdf_author`,
 …); where both set a key, the companion wins.
 
+A field name is a dot-path into a nested XML or JSON companion document —
+`device.id` reaches a `<device><id>` grandchild or a `{"device": {"id": ...}}`
+value the same way. No XPath or JSONPath, just descent through nested
+objects; the output stays flat, keyed by the literal dotted name.
+
 ```yaml
 source:
-  metadata_fields: [device_id, department, pdf_title]
+  metadata_fields: [device_id, department, pdf_title, device.site]
 ```
 
 ---
