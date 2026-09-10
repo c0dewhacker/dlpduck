@@ -74,6 +74,47 @@ secrets:
 Keep the HMAC key stable. Changing it breaks correlation of masked findings
 across documents. Rotating the session secret signs users out.
 
+### Environment configuration
+
+Every YAML value can be overridden with a double-underscore environment path.
+Environment values are applied before validation and take precedence over the
+file:
+
+```text
+DLPDUCK__SOURCE__POLL_SECONDS=2
+DLPDUCK__CONSOLE__BIND=0.0.0.0:8080
+DLPDUCK__CONSOLE__AUTH__OIDC__ISSUER=https://idp.example/realms/dlpduck
+DLPDUCK__CONSOLE__AUTH__OIDC__CLIENT_ID=dlpduck
+DLPDUCK__CONSOLE__AUTH__OIDC__ROLE_MAP={"compliance-team":"auditor"}
+```
+
+Lists and mappings accept JSON or inline YAML. The three secret values are
+read directly from `DLPDUCK_HMAC_KEY`, `DLPDUCK_SESSION_SECRET`, and
+`DLPDUCK_OIDC_CLIENT_SECRET`.
+
+The chart loads every key from `secrets.existingSecret` into the container. A
+Secret managed by External Secrets, Sealed Secrets, SOPS, or another controller
+can therefore contain both direct secrets and configuration overrides:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: dlpduck-secrets
+  namespace: dlpduck
+type: Opaque
+stringData:
+  DLPDUCK_HMAC_KEY: "..."
+  DLPDUCK_SESSION_SECRET: "..."
+  DLPDUCK_OIDC_CLIENT_SECRET: "..."
+  DLPDUCK__CONSOLE__AUTH__OIDC__ISSUER: "https://idp.example/realms/dlpduck"
+  DLPDUCK__CONSOLE__AUTH__OIDC__CLIENT_ID: "dlpduck"
+```
+
+Non-secret overrides can instead be set under `configuration.env`. Use
+`extraEnv` for individual `secretKeyRef` entries and `extraEnvFrom` for
+additional Secret or ConfigMap sources.
+
 ### Storage
 
 The chart creates separate claims for:

@@ -185,6 +185,12 @@ dlpduck scan some.pdf --config config.yaml     # prints lines + what would hit
 A minimal config is `source`, `destination`, and `dlp.rules`; everything else has
 a default. The full shape:
 
+Environment variables named `DLPDUCK__SECTION__FIELD` override YAML before
+validation. For example, `DLPDUCK__CONSOLE__BIND=0.0.0.0:8080` overrides
+`console.bind`; lists and mappings accept JSON or inline YAML. The HMAC and
+session values remain in `DLPDUCK_HMAC_KEY` and `DLPDUCK_SESSION_SECRET`, so
+they never need to appear in the configuration file.
+
 ```yaml
 version: 2                      # the config format; a mismatch is refused, not guessed at
 umask: "0077"                   # owner-only for everything written; null to inherit

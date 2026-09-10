@@ -50,6 +50,10 @@ spec:
               value: "true"
             - name: PYTHONDONTWRITEBYTECODE
               value: "1"
+            {{- range $name, $value := .Values.configuration.env }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+            {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

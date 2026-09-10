@@ -1,3 +1,5 @@
+# Any value can be overridden with a double-underscore environment path:
+# DLPDUCK__CONSOLE__BIND=0.0.0.0:8080 takes precedence over console.bind.
 version: 2
 
 # Everything written here is sensitive — archived PDFs, the content store,
