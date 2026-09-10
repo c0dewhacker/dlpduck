@@ -1,0 +1,47 @@
+{{- if .Values.ingress.enabled }}
+{{- $cm := and .Values.ingress.tls.enabled .Values.ingress.tls.certManager.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "dlpduck.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "dlpduck.labels" . | nindent 4 }}
+  {{- if or $cm .Values.ingress.annotations }}
+  annotations:
+    {{- if $cm }}
+    {{- if eq .Values.ingress.tls.certManager.issuerType "ClusterIssuer" }}
+    cert-manager.io/cluster-issuer: {{ required "ingress.tls.certManager.issuerName is required" .Values.ingress.tls.certManager.issuerName | quote }}
+    {{- else if eq .Values.ingress.tls.certManager.issuerType "Issuer" }}
+    cert-manager.io/issuer: {{ required "ingress.tls.certManager.issuerName is required" .Values.ingress.tls.certManager.issuerName | quote }}
+    {{- else }}
+    {{- fail "ingress.tls.certManager.issuerType must be ClusterIssuer or Issuer" }}
+    {{- end }}
+    {{- end }}
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host | quote }}
+      secretName: {{ .Values.ingress.tls.secretName }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          - path: {{ .Values.ingress.path }}
+            pathType: {{ .Values.ingress.pathType }}
+            backend:
+              service:
+                name: {{ include "dlpduck.fullname" . }}
+                port:
+                  name: http
+{{- end }}
+

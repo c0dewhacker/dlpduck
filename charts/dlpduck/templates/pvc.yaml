@@ -1,0 +1,32 @@
+{{- range $store := list "drop" "archive" "quarantine" "work" "audit" }}
+{{- $settings := index $.Values.persistence $store }}
+{{- if and $settings.enabled (not $settings.existingClaim) }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "dlpduck.claimName" (list $ $store) }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "dlpduck.labels" $ | nindent 4 }}
+    app.kubernetes.io/storage: {{ $store }}
+  {{- if or $.Values.persistence.retain $settings.annotations }}
+  annotations:
+    {{- if $.Values.persistence.retain }}
+    helm.sh/resource-policy: keep
+    {{- end }}
+    {{- with $settings.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- end }}
+spec:
+  accessModes:
+    {{- toYaml $settings.accessModes | nindent 4 }}
+  {{- with $settings.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $settings.size }}
+{{- end }}
+{{- end }}

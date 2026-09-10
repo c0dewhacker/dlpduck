@@ -1,0 +1,145 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "dlpduck.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "dlpduck.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "dlpduck.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        {{- if not .Values.configuration.existingConfigMap }}
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- end }}
+        {{- if .Values.secrets.create }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "dlpduck.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: document-processor
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "dlpduck.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: dlpduck
+          image: {{ include "dlpduck.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["--config", "/etc/dlpduck/{{ .Values.configuration.key }}"]
+          env:
+            - name: DLPDUCK_RUN_BOTH
+              value: "true"
+            - name: PYTHONDONTWRITEBYTECODE
+              value: "1"
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          envFrom:
+            - secretRef:
+                name: {{ include "dlpduck.secretName" . }}
+            {{- with .Values.extraEnvFrom }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            {{- toYaml .Values.startupProbe | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/dlpduck
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+            - name: drop
+              mountPath: /data/drop
+            - name: archive
+              mountPath: /data/archive
+            - name: quarantine
+              mountPath: /data/quarantine
+            - name: work
+              mountPath: /data/work
+            - name: audit
+              mountPath: /data/audit
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "dlpduck.configMapName" . }}
+        - name: tmp
+          emptyDir: {}
+        {{- range $store := list "drop" "archive" "quarantine" "work" "audit" }}
+        {{- $settings := index $.Values.persistence $store }}
+        - name: {{ $store }}
+          {{- if $settings.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "dlpduck.claimName" (list $ $store) }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.runtimeClassName }}
+      runtimeClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
