@@ -29,6 +29,9 @@ def test_release_please_updates_each_explicit_version_file():
     config = json.loads((ROOT / "release-please-config.json").read_text())
     extra_files = config["packages"]["."]["extra-files"]
 
+    # The Python strategy owns pyproject.toml; these are the other shipped
+    # version fields that do not have a language-specific updater.
+    assert config["release-type"] == "python"
     assert "dlpduck/__init__.py" in extra_files
     yaml_targets = {
         (entry["path"], entry["jsonpath"])
@@ -39,3 +42,6 @@ def test_release_please_updates_each_explicit_version_file():
         ("charts/dlpduck/Chart.yaml", "$.version"),
         ("charts/dlpduck/Chart.yaml", "$.appVersion"),
     }
+
+    release_workflow = (ROOT / ".github/workflows/release-please.yml").read_text()
+    assert "uv lock" in release_workflow
