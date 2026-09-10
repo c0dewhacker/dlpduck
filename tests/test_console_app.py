@@ -17,6 +17,7 @@ from dlpduck import __version__
 from dlpduck.config import Config
 from dlpduck.console.app import create_app
 from dlpduck.console.auth import hash_password
+from dlpduck.masking import mask
 from dlpduck.pipeline import Pipeline
 from dlpduck.reprocess import Reprocessor, latest_index_rows
 from tests.pdf_factory import write_pdf
@@ -323,7 +324,15 @@ class TestJobDetailPermissions:
         assert resp.status_code == 200
         assert "quarantine" in resp.text
         assert "dlp.hits.read" in resp.text  # the denial message
-        assert "1111" not in resp.text  # no raw or even masked value leaked as plain text
+        assert "4111 1111 1111 1111" not in resp.text  # never the raw value
+        # pan.generic keeps a 4-digit tail (mask_keep: 4) for a role that
+        # *can* see hits — computed via mask() over the exact regex match,
+        # not hardcoded, so this pins the actual masked form rather than a
+        # bare "1111" substring, which a content-derived job_id can
+        # coincidentally also contain (this page legitimately shows it in
+        # "Technical details") and occasionally did, flaking the suite on
+        # an unrelated hex digest.
+        assert mask("4111 1111 1111 1111", keep=4) not in resp.text
 
     def test_investigator_sees_masked_hit_details(self, env):
         client = env["client"]
