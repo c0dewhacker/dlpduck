@@ -14,10 +14,11 @@
     },
     "configuration": {
       "type": "object",
-      "required": ["existingConfigMap", "key", "data"],
+      "required": ["existingConfigMap", "key", "env", "data"],
       "properties": {
         "existingConfigMap": {"type": "string"},
         "key": {"type": "string", "minLength": 1},
+        "env": {"type": "object", "additionalProperties": {"type": ["string", "number", "boolean"]}},
         "data": {"type": "object"}
       }
     },

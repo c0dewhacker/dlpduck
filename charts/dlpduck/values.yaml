@@ -17,6 +17,12 @@ fullnameOverride: ""
 configuration:
   existingConfigMap: ""
   key: config.yaml
+  # Non-secret environment overrides. Use DLPDUCK__SECTION__FIELD names.
+  # For valueFrom references use extraEnv; keys in secrets.existingSecret
+  # are loaded automatically through envFrom.
+  env: {}
+  # DLPDUCK__CONSOLE__AUTH__OIDC__ISSUER: https://idp.example/realms/dlpduck
+  # DLPDUCK__CONSOLE__AUTH__OIDC__CLIENT_ID: dlpduck
   data:
     version: 2
     umask: "0077"

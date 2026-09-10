@@ -64,6 +64,65 @@ class TestLoadConfig:
         rules = config.load_rules()
         assert any(r.id == "pan.generic" for r in rules)
 
+    def test_environment_overrides_yaml_and_can_create_nested_oidc_config(
+        self, tmp_path, monkeypatch
+    ):
+        path = _write_config(tmp_path)
+        path.write_text(
+            path.read_text()
+            + """
+console:
+  bind: 127.0.0.1:8080
+  session_cookie_secure: false
+"""
+        )
+        monkeypatch.setenv("DLPDUCK__SOURCE__POLL_SECONDS", "0.25")
+        monkeypatch.setenv("DLPDUCK__CONSOLE__BIND", "0.0.0.0:9090")
+        monkeypatch.setenv("DLPDUCK__CONSOLE__SESSION_COOKIE_SECURE", "true")
+        monkeypatch.setenv(
+            "DLPDUCK__CONSOLE__AUTH__OIDC__ISSUER", "https://idp.example/realms/dlpduck"
+        )
+        monkeypatch.setenv("DLPDUCK__CONSOLE__AUTH__OIDC__CLIENT_ID", "dlpduck")
+        monkeypatch.setenv(
+            "DLPDUCK__CONSOLE__AUTH__OIDC__ROLE_MAP",
+            '{"compliance-team": "auditor"}',
+        )
+
+        config = load_config(path)
+
+        assert config.source.poll_seconds == 0.25
+        assert config.console.bind == "0.0.0.0:9090"
+        assert config.console.session_cookie_secure is True
+        assert config.console.auth.oidc is not None
+        assert config.console.auth.oidc.issuer == "https://idp.example/realms/dlpduck"
+        assert config.console.auth.oidc.client_id == "dlpduck"
+        assert config.console.auth.oidc.role_map == {"compliance-team": "auditor"}
+
+    def test_environment_can_replace_list_values(self, tmp_path, monkeypatch):
+        path = _write_config(tmp_path)
+        monkeypatch.setenv(
+            "DLPDUCK__DLP__RULES",
+            '[{"id":"env.rule","name":"Environment rule","pattern":"ENV","severity":"LOW"}]',
+        )
+
+        [rule] = load_config(path).load_rules()
+
+        assert rule.id == "env.rule"
+
+    def test_malformed_environment_path_is_rejected(self, tmp_path, monkeypatch):
+        path = _write_config(tmp_path)
+        monkeypatch.setenv("DLPDUCK__CONSOLE____BIND", "0.0.0.0:8080")
+
+        with pytest.raises(ConfigError, match="malformed"):
+            load_config(path)
+
+    def test_environment_cannot_descend_through_a_scalar(self, tmp_path, monkeypatch):
+        path = _write_config(tmp_path)
+        monkeypatch.setenv("DLPDUCK__SOURCE__NAME__PART", "invalid")
+
+        with pytest.raises(ConfigError, match="not a mapping"):
+            load_config(path)
+
 
 class TestValidateConfig:
     def test_missing_hmac_key_env_fails_validation(self, tmp_path, monkeypatch):

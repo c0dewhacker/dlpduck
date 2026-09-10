@@ -51,6 +51,22 @@ secrets:
 The Secret must contain `DLPDUCK_HMAC_KEY` and `DLPDUCK_SESSION_SECRET`, plus
 any environment variables referenced by OIDC or plugins.
 
+Any application setting can override the generated YAML with a
+`DLPDUCK__SECTION__FIELD` environment variable. This lets one external Secret
+hold the complete OIDC setup without placing it in the chart ConfigMap:
+
+```yaml
+stringData:
+  DLPDUCK_HMAC_KEY: "..."
+  DLPDUCK_SESSION_SECRET: "..."
+  DLPDUCK_OIDC_CLIENT_SECRET: "..."
+  DLPDUCK__CONSOLE__AUTH__OIDC__ISSUER: "https://idp.example/realms/dlpduck"
+  DLPDUCK__CONSOLE__AUTH__OIDC__CLIENT_ID: "dlpduck"
+```
+
+Use `configuration.env` for plain values, `extraEnv` for individual
+`secretKeyRef` values, and `extraEnvFrom` for additional Secret sources.
+
 ## Storage
 
 The five entries under `persistence` accept a storage class, access modes, size,

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
@@ -222,6 +222,7 @@ class RetentionConfig(BaseModel):
 # and take its default, which for something like quarantine_on_degraded
 # means a policy quietly flipping on upgrade.
 SUPPORTED_CONFIG_VERSION = 2
+CONFIG_ENV_PREFIX = "DLPDUCK__"
 
 
 class Config(BaseModel):
@@ -294,12 +295,54 @@ class ConfigError(ValueError):
     pass
 
 
+def _environment_value(name: str, value: str) -> Any:
+    """Decode collection/null overrides; scalar coercion remains Pydantic's job."""
+    stripped = value.strip()
+    if stripped.lower() in {"null", "~"}:
+        return None
+    if stripped.startswith(("[", "{")):
+        try:
+            return yaml.safe_load(stripped)
+        except yaml.YAMLError as exc:
+            raise ConfigError(f"{name} contains invalid YAML/JSON: {exc}") from exc
+    return value
+
+
+def _apply_environment_overrides(raw: dict[str, Any]) -> dict[str, Any]:
+    """Overlay ``DLPDUCK__SECTION__FIELD`` variables onto parsed YAML."""
+    for name in sorted(os.environ):
+        if not name.startswith(CONFIG_ENV_PREFIX):
+            continue
+        suffix = name.removeprefix(CONFIG_ENV_PREFIX)
+        parts = [part.lower() for part in suffix.split("__")]
+        if not suffix or any(not part for part in parts):
+            raise ConfigError(
+                f"{name} is malformed; use {CONFIG_ENV_PREFIX}SECTION__FIELD"
+            )
+
+        target = raw
+        for part in parts[:-1]:
+            existing = target.get(part)
+            if existing is None:
+                target[part] = {}
+            elif not isinstance(existing, dict):
+                raise ConfigError(
+                    f"{name} cannot override through {part!r}; the YAML value is not a mapping"
+                )
+            target = target[part]
+        target[parts[-1]] = _environment_value(name, os.environ[name])
+    return raw
+
+
 def load_config(path: str | Path) -> Config:
     path = Path(path)
     if not path.is_file():
         raise ConfigError(f"config file not found: {path}")
     with open(path, encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
+    if not isinstance(raw, dict):
+        raise ConfigError("config must be a YAML mapping")
+    raw = _apply_environment_overrides(raw)
     declared = raw.get("version", SUPPORTED_CONFIG_VERSION)
     if declared != SUPPORTED_CONFIG_VERSION:
         raise ConfigError(
