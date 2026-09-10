@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from dlpduck import __version__
 from dlpduck.config import Config
 from dlpduck.console.app import create_app
 from dlpduck.console.auth import hash_password
@@ -167,6 +168,7 @@ class TestLogin:
         resp = env["client"].get("/login")
         assert resp.status_code == 200
         assert "Log in" in resp.text
+        assert f"DLPDuck v{__version__}" in resp.text
         assert resp.headers["cache-control"] == "no-store"
 
     def test_logout_revokes_a_captured_session_cookie(self, env):
@@ -212,6 +214,7 @@ class TestLogin:
         )
         assert resp.status_code == 303
         assert resp.headers["location"] == "/jobs"
+        assert f"DLPDuck v{__version__}" in client.get("/jobs").text
 
     def test_wrong_password_is_rejected_with_401_and_stays_on_login(self, env):
         resp = env["client"].post("/login", data={"username": "viewer1", "password": "wrong"})

@@ -1,0 +1,12 @@
+{{- if not .Values.configuration.existingConfigMap }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "dlpduck.configMapName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "dlpduck.labels" . | nindent 4 }}
+data:
+  {{ .Values.configuration.key }}: |
+    {{- toYaml .Values.configuration.data | nindent 4 }}
+{{- end }}

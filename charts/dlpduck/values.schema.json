@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["image", "configuration", "secrets", "persistence", "service"],
+  "properties": {
+    "image": {
+      "type": "object",
+      "required": ["repository", "pullPolicy"],
+      "properties": {
+        "repository": {"type": "string", "minLength": 1},
+        "tag": {"type": "string"},
+        "pullPolicy": {"enum": ["Always", "IfNotPresent", "Never"]}
+      }
+    },
+    "configuration": {
+      "type": "object",
+      "required": ["existingConfigMap", "key", "data"],
+      "properties": {
+        "existingConfigMap": {"type": "string"},
+        "key": {"type": "string", "minLength": 1},
+        "data": {"type": "object"}
+      }
+    },
+    "secrets": {
+      "type": "object",
+      "required": ["create", "existingSecret"],
+      "properties": {
+        "create": {"type": "boolean"},
+        "existingSecret": {"type": "string"},
+        "hmacKey": {"type": "string"},
+        "sessionSecret": {"type": "string"},
+        "extra": {"type": "object", "additionalProperties": {"type": "string"}}
+      }
+    },
+    "persistence": {
+      "type": "object",
+      "required": ["retain", "drop", "archive", "quarantine", "work", "audit"],
+      "properties": {
+        "retain": {"type": "boolean"},
+        "drop": {"$ref": "#/definitions/store"},
+        "archive": {"$ref": "#/definitions/store"},
+        "quarantine": {"$ref": "#/definitions/store"},
+        "work": {"$ref": "#/definitions/store"},
+        "audit": {"$ref": "#/definitions/store"}
+      }
+    },
+    "service": {
+      "type": "object",
+      "required": ["type", "port"],
+      "properties": {
+        "type": {"enum": ["ClusterIP", "NodePort", "LoadBalancer"]},
+        "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "annotations": {"type": "object"}
+      }
+    },
+    "ingress": {"type": "object"},
+    "resources": {"type": "object"},
+    "serviceAccount": {"type": "object"},
+    "networkPolicy": {"type": "object"},
+    "extraEnv": {"type": "array"},
+    "extraEnvFrom": {"type": "array"},
+    "extraVolumes": {"type": "array"},
+    "extraVolumeMounts": {"type": "array"}
+  },
+  "definitions": {
+    "store": {
+      "type": "object",
+      "required": ["enabled", "existingClaim", "accessModes", "size"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "existingClaim": {"type": "string"},
+        "storageClass": {"type": "string"},
+        "accessModes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"enum": ["ReadWriteOnce", "ReadOnlyMany", "ReadWriteMany", "ReadWriteOncePod"]}
+        },
+        "size": {"type": "string", "pattern": "^[0-9]+(Ei|Pi|Ti|Gi|Mi|Ki|E|P|T|G|M|K)?$"},
+        "annotations": {"type": "object"}
+      }
+    }
+  }
+}

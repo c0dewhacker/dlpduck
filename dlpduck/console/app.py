@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
+from dlpduck import __version__
 from dlpduck.config import Config
 from dlpduck.console.auth import (
     LocalUserStore,
@@ -186,6 +187,7 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
     # Lets base.html's nav hide links a role can't use, without every
     # route having to compute and pass that set itself.
     templates.env.globals["has_permission"] = has_permission
+    templates.env.globals["app_version"] = __version__
     reprocessor = Reprocessor(pipeline)
     failures = FailureQueue(pipeline)
 

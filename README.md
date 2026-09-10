@@ -51,6 +51,7 @@ documents under new rules, approve releases, and purge retained content.
 - [How it works](#how-it-works)
 - [Install](#install)
 - [Docker](#docker)
+- [Kubernetes](#kubernetes)
 - [Quick start](#quick-start)
 - [Configuration](#configuration)
 - [Writing rules](#writing-rules)
@@ -125,6 +126,20 @@ it, audit data remains under the mounted `work_dir/audit`. The endpoints
 readiness checks. Omit `DLPDUCK_RUN_BOTH` and pass `run` or `console run` to run
 one role. Container paths in the config must match the mounted paths, which must
 be writable by the image's non-root user.
+
+## Kubernetes
+
+A Helm chart in [`charts/dlpduck`](charts/dlpduck) runs the watcher and console
+together with separate persistent claims for incoming files, archive,
+quarantine, working data and the audit trail:
+
+```bash
+helm upgrade --install dlpduck charts/dlpduck \
+  --namespace dlpduck --create-namespace -f my-values.yaml
+```
+
+See the [deployment guide](DEPLOYMENT.md) for secrets, local or OIDC login,
+storage, ingress, TLS, upgrades and recovery.
 
 ---
 

@@ -12,6 +12,7 @@ from pathlib import Path
 
 import click
 
+from dlpduck import __version__
 from dlpduck.audit import AuditLog
 from dlpduck.config import ConfigError, config_warnings, load_config, validate_config
 from dlpduck.content import InvalidJobId
@@ -30,6 +31,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 
 
 @click.group()
+@click.version_option(version=__version__, prog_name="dlpduck")
 def main() -> None:
     """DLPDuck — line-aware OCR/DLP document ingestion engine."""
 

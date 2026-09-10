@@ -111,6 +111,11 @@
     background: none; border: none; padding: 0; cursor: pointer;
   }
   .sidebar-foot button:hover { color: #fff; }
+  .app-version {
+    color: var(--sidebar-ink-dim); font-family: var(--f-mono); font-size: 10px;
+    letter-spacing: 0.04em; margin-top: 10px;
+  }
+  .authpage .app-version { color: var(--ink-faint); text-align: center; }
 
   .content { flex: 1; min-width: 0; padding: var(--sp-6) var(--sp-7); }
   .content-inner { max-width: 1320px; }
@@ -339,6 +344,7 @@
       <form method="post" action="/logout">
         <button type="submit">log out &rarr;</button>
       </form>
+      <div class="app-version">DLPDuck v{{ app_version }}</div>
     </div>
   </aside>
   <main id="main-content" class="content"><div class="content-inner">
@@ -350,6 +356,7 @@
 <div class="authcard">
   <div class="brand"><img class="mark" src="/static/mascot.png" alt="DLPDuck">DLPDuck</div>
 {{ self.content() }}
+  <div class="app-version">DLPDuck v{{ app_version }}</div>
 </div>
 </div>
 {% endif %}

@@ -1,0 +1,201 @@
+# DLPDuck runs its watcher and console in one pod so they share the same
+# filesystem state. The workload deliberately has one replica and uses a
+# Recreate strategy; do not run two watchers against one drop directory.
+
+image:
+  repository: c0dewhacker/dlpduck
+  # An empty tag uses Chart.appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# DLPDuck reads this structure as /etc/dlpduck/config.yaml. Use an existing
+# ConfigMap when you need additional rule files beside config.yaml.
+configuration:
+  existingConfigMap: ""
+  key: config.yaml
+  data:
+    version: 2
+    umask: "0077"
+    source:
+      name: kubernetes
+      path: /data/drop
+      metadata_format: none
+      poll_seconds: 5.0
+      stability_polls: 2
+      metadata_grace_polls: 3
+    limits:
+      max_bytes: 209715200
+      max_pages: 500
+      rule_budget_ms: 2000
+      max_metadata_bytes: 1048576
+    extraction:
+      dpi: 150
+      native_min_chars: 20
+      isolate_worker: true
+      timeout_seconds: 120
+    dlp:
+      quarantine_on_degraded: true
+      hmac_key_env: DLPDUCK_HMAC_KEY
+      rules:
+        - include: builtin:default.yaml
+    destination:
+      archive: /data/archive
+      quarantine: /data/quarantine
+      work_dir: /data/work
+    audit:
+      integrity: chained
+      path: /data/audit
+    retention:
+      documents_days: null
+      index_days: null
+      audit_days: null
+    console:
+      bind: 0.0.0.0:8080
+      session_secret_env: DLPDUCK_SESSION_SECRET
+      session_max_age_seconds: 28800
+      session_cookie_secure: false
+      audit_search_terms: hashed
+      auth:
+        max_failed_logins: 10
+        lockout_seconds: 300
+        users: []
+
+secrets:
+  # When create is false, existingSecret must contain DLPDUCK_HMAC_KEY and
+  # DLPDUCK_SESSION_SECRET. It may also contain optional plugin/OIDC secrets.
+  create: true
+  existingSecret: ""
+  hmacKey: ""
+  sessionSecret: ""
+  extra: {}
+  # DLPDUCK_OIDC_CLIENT_SECRET: ""
+
+# Each sensitive store has its own claim so storage classes, snapshots and
+# access controls can be managed independently. Set an existingClaim to mount
+# storage provisioned outside this release. Disabled stores use emptyDir.
+persistence:
+  # Keep generated PVCs when the Helm release is uninstalled.
+  retain: true
+  drop:
+    enabled: true
+    existingClaim: ""
+    storageClass: ""
+    accessModes: [ReadWriteOnce]
+    size: 10Gi
+    annotations: {}
+  archive:
+    enabled: true
+    existingClaim: ""
+    storageClass: ""
+    accessModes: [ReadWriteOnce]
+    size: 50Gi
+    annotations: {}
+  quarantine:
+    enabled: true
+    existingClaim: ""
+    storageClass: ""
+    accessModes: [ReadWriteOnce]
+    size: 50Gi
+    annotations: {}
+  work:
+    enabled: true
+    existingClaim: ""
+    storageClass: ""
+    accessModes: [ReadWriteOnce]
+    size: 20Gi
+    annotations: {}
+  audit:
+    enabled: true
+    existingClaim: ""
+    storageClass: ""
+    accessModes: [ReadWriteOnce]
+    size: 20Gi
+    annotations: {}
+
+service:
+  type: ClusterIP
+  port: 8080
+  annotations: {}
+
+ingress:
+  enabled: false
+  # The ingress controller installed in the cluster, for example traefik or nginx.
+  className: ""
+  annotations: {}
+  host: dlpduck.example.com
+  path: /
+  pathType: Prefix
+  tls:
+    enabled: false
+    # cert-manager writes the issued certificate to this Secret.
+    secretName: dlpduck-tls
+    certManager:
+      enabled: false
+      # ClusterIssuer is cluster-scoped; Issuer is resolved in the release namespace.
+      issuerType: ClusterIssuer
+      issuerName: letsencrypt-prod
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: "2"
+    memory: 2Gi
+
+startupProbe:
+  failureThreshold: 30
+  periodSeconds: 5
+livenessProbe:
+  periodSeconds: 15
+  timeoutSeconds: 5
+  failureThreshold: 3
+readinessProbe:
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podAnnotations: {}
+podLabels: {}
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 999
+  runAsGroup: 999
+  fsGroup: 999
+  fsGroupChangePolicy: OnRootMismatch
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
+
+terminationGracePeriodSeconds: 30
+priorityClassName: ""
+runtimeClassName: ""
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+
+# Applied directly to the container. Prefer secretKeyRef for sensitive values.
+extraEnv: []
+extraEnvFrom: []
+extraVolumes: []
+extraVolumeMounts: []
+
+networkPolicy:
+  enabled: false
+  # By default, allow console traffic from every namespace when enabled.
+  # Replace this with namespace/pod selectors to limit ingress callers.
+  ingress:
+    - from:
+        - namespaceSelector: {}

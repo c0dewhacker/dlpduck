@@ -4,7 +4,20 @@
   "include-component-in-tag": false,
   "packages": {
     ".": {
-      "package-name": "dlpduck"
+      "package-name": "dlpduck",
+      "extra-files": [
+        "dlpduck/__init__.py",
+        {
+          "type": "yaml",
+          "path": "charts/dlpduck/Chart.yaml",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "yaml",
+          "path": "charts/dlpduck/Chart.yaml",
+          "jsonpath": "$.appVersion"
+        }
+      ]
     }
   },
   "bump-minor-pre-major": true,

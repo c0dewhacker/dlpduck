@@ -1,0 +1,19 @@
+DLPDuck {{ .Chart.AppVersion }} has been deployed.
+
+Console:
+{{- if .Values.ingress.enabled }}
+  {{ ternary "https" "http" .Values.ingress.tls.enabled }}://{{ .Values.ingress.host }}
+{{- else }}
+  kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "dlpduck.fullname" . }} 8080:{{ .Values.service.port }}
+  http://127.0.0.1:8080
+{{- end }}
+
+Status:
+  kubectl get pods,pvc -n {{ .Release.Namespace }} -l app.kubernetes.io/instance={{ .Release.Name }}
+  kubectl logs -n {{ .Release.Namespace }} deploy/{{ include "dlpduck.fullname" . }}
+
+Drop folder claim:
+  {{ include "dlpduck.claimName" (list . "drop") }}
+
+The console needs a local user or OIDC provider in configuration.data.console.auth.
+Generate a local password hash with the DLPDuck image before adding the account.
