@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.5](https://github.com/c0dewhacker/dlpduck/compare/v0.1.4...v0.1.5) (2026-09-10)
+
+
+### Features
+
+* allow environment config overrides ([ca8bf3b](https://github.com/c0dewhacker/dlpduck/commit/ca8bf3bbecdd02103d933da78f120ee484b62064))
+* allow environment config overrides ([687ea67](https://github.com/c0dewhacker/dlpduck/commit/687ea67b1dcee3919d764d12eaeca0d617009292))
+
 ## [0.1.4](https://github.com/c0dewhacker/dlpduck/compare/v0.1.3...v0.1.4) (2026-09-10)
 
 
