@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.4](https://github.com/c0dewhacker/dlpduck/compare/v0.1.3...v0.1.4) (2026-09-10)
+
+
+### Features
+
+* add Helm deployment and managed version reporting ([3ba858d](https://github.com/c0dewhacker/dlpduck/commit/3ba858d9975dea8856dc564ed75dd713972bc9be))
+* add Kubernetes Helm chart ([7a3f884](https://github.com/c0dewhacker/dlpduck/commit/7a3f884ab83b4856e439a970cca2d6ccac539d72))
+* display managed application version ([203d3ac](https://github.com/c0dewhacker/dlpduck/commit/203d3ac9e38d3f22a54b0f4f635052dcb99e0cb1))
+
 ## [0.1.3](https://github.com/c0dewhacker/dlpduck/compare/v0.1.2...v0.1.3) (2026-09-09)
 
 
