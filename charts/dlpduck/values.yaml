@@ -123,6 +123,7 @@ service:
 
 ingress:
   enabled: false
+  # The ingress controller installed in the cluster, for example traefik or nginx.
   className: ""
   annotations: {}
   host: dlpduck.example.com
@@ -130,9 +131,11 @@ ingress:
   pathType: Prefix
   tls:
     enabled: false
+    # cert-manager writes the issued certificate to this Secret.
     secretName: dlpduck-tls
     certManager:
       enabled: false
+      # ClusterIssuer is cluster-scoped; Issuer is resolved in the release namespace.
       issuerType: ClusterIssuer
       issuerName: letsencrypt-prod
 

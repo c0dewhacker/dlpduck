@@ -68,3 +68,7 @@ watchers must not consume the same drop folder concurrently.
 
 See the repository [deployment guide](../../DEPLOYMENT.md) for ingress, TLS,
 storage and upgrade examples.
+
+The ingress integration supports cert-manager through either a cluster-wide
+`ClusterIssuer` or a namespaced `Issuer`. When TLS is enabled, also set
+`configuration.data.console.session_cookie_secure: true`.

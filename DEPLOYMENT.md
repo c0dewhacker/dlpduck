@@ -103,6 +103,10 @@ ingress:
   tls:
     enabled: true
     secretName: dlpduck-tls
+    certManager:
+      enabled: true
+      issuerType: ClusterIssuer
+      issuerName: letsencrypt-prod
 
 configuration:
   data:
@@ -112,9 +116,9 @@ configuration:
       session_cookie_secure: true
 ```
 
-The chart can add cert-manager issuer annotations through
-`ingress.tls.certManager`. Limit access at the ingress, identity provider and
-network layer; the console contains sensitive document and audit information.
+Set `issuerType` to `Issuer` for a namespaced issuer. Limit access at the
+ingress, identity provider and network layer; the console contains sensitive
+document and audit information.
 
 ### Existing configuration and rules
 
