@@ -10,4 +10,3 @@ data:
   {{ .Values.configuration.key }}: |
     {{- toYaml .Values.configuration.data | nindent 4 }}
 {{- end }}
-

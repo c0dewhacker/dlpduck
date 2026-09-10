@@ -65,4 +65,3 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- $settings := index $root.Values.persistence $store -}}
 {{- default (printf "%s-%s" (include "dlpduck.fullname" $root) $store) $settings.existingClaim -}}
 {{- end }}
-

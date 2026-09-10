@@ -17,4 +17,3 @@ Drop folder claim:
 
 The console needs a local user or OIDC provider in configuration.data.console.auth.
 Generate a local password hash with the DLPDuck image before adding the account.
-

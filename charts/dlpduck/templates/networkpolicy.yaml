@@ -20,4 +20,3 @@ spec:
           protocol: TCP
     {{- end }}
 {{- end }}
-

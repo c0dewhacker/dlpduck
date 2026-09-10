@@ -18,4 +18,3 @@ spec:
       protocol: TCP
   selector:
     {{- include "dlpduck.selectorLabels" . | nindent 4 }}
-
