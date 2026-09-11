@@ -744,3 +744,51 @@ class TestClaimRacingAnInFlightJob:
         # The racing claim's own source file was cleaned up, same as any
         # other resolved duplicate arrival.
         assert not identical_copy.exists()
+
+
+class TestClaimAndExtractionAreSeparatelyDrivable:
+    """The watcher only calls stage() (claim, no extraction); a separate,
+    continuously-run resume_staged() sweep does the rest — on any
+    replica, any number of them. These prove the two halves actually
+    compose, and that concurrent sweeps split staged work without ever
+    processing the same job twice."""
+
+    def test_stage_alone_leaves_the_job_unprocessed_until_a_sweep_runs(self, tmp_path, config):
+        pipeline = Pipeline(config)
+        staging = config.destination.work_dir / "_processing"
+
+        ctx = pipeline.stage(_pdf(tmp_path / "doc.pdf", ["ordinary content"]), None, staging)
+
+        assert ctx is not None
+        assert ctx.disposition == "pending"
+        assert latest_index_rows(pipeline.index_root, job_ids=[ctx.job_id]) == []
+
+        [resumed] = pipeline.resume_staged(staging)
+
+        assert resumed.job_id == ctx.job_id
+        assert latest_index_rows(pipeline.index_root, job_ids=[ctx.job_id])[0]["disposition"] == "archive"
+
+    def test_concurrent_sweeps_split_a_staged_queue_without_double_processing(self, tmp_path, config):
+        pipeline = Pipeline(config)
+        staging = config.destination.work_dir / "_processing"
+        job_count = 6
+        for i in range(job_count):
+            staged = pipeline.stage(_pdf(tmp_path / f"doc{i}.pdf", [f"distinct content {i}"]), None, staging)
+            assert staged is not None
+
+        results: list[list] = [[] for _ in range(3)]
+
+        def sweep(i: int) -> None:
+            results[i] = pipeline.resume_staged(staging)
+
+        workers = [threading.Thread(target=sweep, args=(i,)) for i in range(3)]
+        for w in workers:
+            w.start()
+        for w in workers:
+            w.join()
+
+        processed = [ctx.job_id for r in results for ctx in r]
+        assert len(processed) == len(set(processed)), "a job was processed by more than one sweep"
+        assert len(set(processed)) == job_count, "not every staged job was picked up"
+        for job_id in processed:
+            assert latest_index_rows(pipeline.index_root, job_ids=[job_id])[0]["disposition"] == "archive"

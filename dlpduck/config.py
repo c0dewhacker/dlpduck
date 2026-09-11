@@ -226,11 +226,17 @@ class ClusterConfig(BaseModel):
     identity: str | None = None  # None: $POD_NAME, then $HOSTNAME
     lease_duration_seconds: float = Field(default=15, gt=0)
     renew_interval_seconds: float = Field(default=5, gt=0)
+    # False (the default): the watcher claims AND extracts a file inline,
+    # exactly as it always has — a standalone/Docker/CLI deployment sees
+    # no behavior change at all. True splits claiming (the watcher) from
+    # extraction (a continuously-run sweep — see sweep_interval_seconds),
+    # so extraction can be picked up by any replica through the same
+    # per-job file lock the crash-recovery sweep already uses. Only worth
+    # setting once there's more than one replica actually running.
+    parallel_extraction: bool = False
     # How often every replica — leader or not — checks _processing/ for
-    # staged work nobody else has claimed yet. This is what actually
-    # spreads extraction across replicas; it needs no leader at all,
-    # since each job is claimed through the same per-job file lock the
-    # crash-recovery sweep already uses.
+    # staged work nobody else has claimed yet. Only read when
+    # parallel_extraction is true.
     sweep_interval_seconds: float = Field(default=5, gt=0)
 
 

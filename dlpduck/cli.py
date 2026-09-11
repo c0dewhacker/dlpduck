@@ -19,6 +19,7 @@ from dlpduck.content import InvalidJobId
 from dlpduck.engine import DLPEngine
 from dlpduck.extract import LineExtractor
 from dlpduck.index import AssessmentExists, compact_partition, plan_compaction
+from dlpduck.leader import build_leader_election
 from dlpduck.pipeline import Pipeline
 from dlpduck.reprocess import Reprocessor, parse_mode
 from dlpduck.retention import apply_retention, plan_retention
@@ -584,26 +585,69 @@ def verify_audit_cmd(config_path: str) -> None:
 @main.command()
 @click.option("--config", "config_path", required=True, type=click.Path(exists=True))
 def run(config_path: str) -> None:
-    """Start the daemon: resume any interrupted jobs, then watch."""
+    """Start the daemon: resume any interrupted jobs, then watch.
+
+    cluster.parallel_extraction (default false) changes nothing here for
+    a standalone/single-pod deployment: the watcher still claims and
+    extracts inline, one crash-recovery sweep runs once at startup, and
+    leader election never engages (its own default is "none"). Setting
+    it true is what a multi-replica deployment opts into — see
+    dlpduck.leader and Pipeline.job_lock for why splitting claim from
+    extraction only matters once there's more than one replica.
+    """
+    log = logging.getLogger("dlpduck.cli")
     config = validate_config(config_path)
     config.apply_umask()  # before anything is written — see Config.umask
     pipeline = Pipeline(config)
 
     staging_root = config.destination.work_dir / "_processing"
-    resumed = pipeline.resume_staged(staging_root)
-    if resumed:
-        logging.getLogger("dlpduck.cli").info("resumed %d interrupted job(s)", len(resumed))
-
-    watcher = Watcher(config, pipeline)
     stop_event = threading.Event()
 
     def _handle_signal(signum, frame):
-        logging.getLogger("dlpduck.cli").info("received signal %s, shutting down", signum)
+        log.info("received signal %s, shutting down", signum)
         stop_event.set()
 
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
-    watcher.run_forever(stop_event)
+
+    election = build_leader_election(config.cluster)
+    election.start()
+
+    sweep_thread = None
+    if config.cluster.parallel_extraction:
+        # Runs on every replica, leader or not: each staged job is
+        # protected by its own file lock (see Pipeline.job_lock), so this
+        # is what actually spreads extraction across replicas. Claiming
+        # new arrivals is the only part that needs a single leader.
+        def sweep_forever() -> None:
+            while not stop_event.is_set():
+                try:
+                    resumed = pipeline.resume_staged(staging_root)
+                    if resumed:
+                        log.info("processed %d staged job(s)", len(resumed))
+                except Exception:
+                    log.exception("extraction sweep failed")
+                stop_event.wait(config.cluster.sweep_interval_seconds)
+
+        sweep_thread = threading.Thread(target=sweep_forever, name="extraction-sweep", daemon=True)
+        sweep_thread.start()
+    else:
+        resumed = pipeline.resume_staged(staging_root)
+        if resumed:
+            log.info("resumed %d interrupted job(s)", len(resumed))
+
+    watcher = Watcher(
+        config, pipeline,
+        is_leader=lambda: election.is_leader,
+        claim_only=config.cluster.parallel_extraction,
+    )
+    try:
+        watcher.run_forever(stop_event)
+    finally:
+        stop_event.set()
+        if sweep_thread is not None:
+            sweep_thread.join(timeout=config.cluster.sweep_interval_seconds * 2)
+        election.stop()
 
 
 @main.command()
