@@ -10,7 +10,7 @@ from pathlib import Path
 
 from dlpduck.content import validate_job_id
 from dlpduck.durability import copy_durably, write_atomically
-from dlpduck.operations import serialized
+from dlpduck.operations import LockContended, serialized
 from dlpduck.types import DocumentTooLarge, UnsafeSourceFile
 
 logger = logging.getLogger("dlpduck.failures")
@@ -74,11 +74,20 @@ class FailureQueue:
         )
         logger.debug("failure queue: %s %s resolved by %s", kind, job_id, actor)
 
-    @serialized
     def retry(self, kind, job_id, reason, actor, confirm_delivery=False):
+        # Deliberately NOT @serialized: retrying re-runs extraction, the
+        # slow part, so this job_id gets its own job_lock() instead of the
+        # global one — unrelated retries/purges/resolves aren't blocked.
         logger.debug("failure queue: retry requested for %s %s by %s", kind, job_id, actor)
         if not reason.strip():
             raise ValueError("A reason is required")
+        try:
+            with self.pipeline.job_lock(job_id, blocking=False):
+                return self._retry_locked(kind, job_id, reason, actor, confirm_delivery)
+        except LockContended:
+            raise ValueError("This item is already being retried; try again shortly") from None
+
+    def _retry_locked(self, kind, job_id, reason, actor, confirm_delivery):
         folder = self.folder(kind, job_id)
         pdf = folder / "document.pdf"
         if pdf.is_symlink() or not pdf.is_file():
@@ -110,7 +119,13 @@ class FailureQueue:
         original_name = "document.pdf"
         if metadata_path.is_file():
             try:
-                original_name = json.loads(metadata_path.read_text()).get("source_name", original_name)
+                meta = json.loads(metadata_path.read_text())
+                # commit_failed() writes the name under "filename";
+                # reject_at_claim() writes it under "source_name". Check
+                # both, or a retry on one path silently renamed the job
+                # to "document.pdf" for good (this is a display name, not
+                # an identifier — job_id is unaffected either way).
+                original_name = meta.get("filename") or meta.get("source_name") or original_name
             except ValueError:
                 pass
         with tempfile.TemporaryDirectory(dir=self.root, prefix="retry-") as directory:
@@ -141,4 +156,7 @@ class FailureQueue:
         self.pipeline.audit.append(
             "job.retry_completed", job_id=job_id, actor=actor, kind=kind
         )
-        shutil.rmtree(folder)
+        # commit() also removes this folder now (needed for the crash-
+        # recovery path, where retry() never got here to do it itself) —
+        # so it may already be gone by the time we reach this line.
+        shutil.rmtree(folder, ignore_errors=True)

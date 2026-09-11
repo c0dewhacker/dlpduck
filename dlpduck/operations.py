@@ -22,28 +22,43 @@ _REGISTRY_LOCK = threading.Lock()
 _HELD = threading.local()
 
 
+class LockContended(Exception):
+    """Raised by operation_lock(..., blocking=False) when another thread or
+    process already holds the lock for that root."""
+
+
 @contextmanager
-def operation_lock(root: Path):
+def operation_lock(root: Path, *, blocking: bool = True):
     import fcntl
 
     root.mkdir(parents=True, exist_ok=True)
     key = str(root.resolve())
     with _REGISTRY_LOCK:
         mutex = _LOCAL_LOCKS.setdefault(key, threading.RLock())
-    with mutex:
+    if not mutex.acquire(blocking=blocking):
+        raise LockContended(key)
+    try:
         held: set[str] = getattr(_HELD, "roots", set())
         if key in held:
             yield
             return
         with open(root / ".operations.lock", "a+b") as lock:
             os.chmod(lock.name, 0o600)
-            fcntl.flock(lock, fcntl.LOCK_EX)
+            if blocking:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+            else:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError as exc:
+                    raise LockContended(key) from exc
             _HELD.roots = held | {key}
             try:
                 yield
             finally:
                 _HELD.roots = held
                 fcntl.flock(lock, fcntl.LOCK_UN)
+    finally:
+        mutex.release()
 
 
 def serialized(method):
@@ -136,7 +151,12 @@ class OperationalStore:
                     "ORDER BY received_at",
                     ids,
                 )
-            return {r["job_id"]: r["filename"] for r in rows}
+            # A job_id can have several receipts (retries add more); keep
+            # the earliest (original ingest name), not the latest.
+            names: dict[str, str] = {}
+            for r in rows:
+                names.setdefault(r["job_id"], r["filename"])
+            return names
 
     def create_session(self, token, username, expires):
         with self.connect() as db:

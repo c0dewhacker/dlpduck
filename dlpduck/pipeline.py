@@ -31,7 +31,7 @@ from dlpduck.engine import DLPEngine
 from dlpduck.extract import LineExtractor
 from dlpduck.index import write_index_row
 from dlpduck.metadata import MetadataParserFactory, allowlist
-from dlpduck.operations import OperationalStore, serialized
+from dlpduck.operations import LockContended, OperationalStore, operation_lock, serialized
 from dlpduck.pdf_metadata import extract_pdf_metadata
 from dlpduck.pdfium import page_count
 from dlpduck.plugins.base import PluginError, PluginRunner
@@ -117,6 +117,11 @@ class Pipeline:
         self.index_root = config.destination.work_dir / "index"
         self.content_root = config.destination.work_dir / "content"
         self.plugins = PluginRunner(config.load_plugins(), self.audit)
+
+    def job_lock(self, job_id: str, *, blocking: bool = True):
+        """Per-job_id lock: stops two recover/retry attempts on the *same*
+        job from racing, without making unrelated job_ids contend."""
+        return operation_lock(self.config.destination.work_dir / "_locks" / job_id, blocking=blocking)
 
     # ── claim ────────────────────────────────────────────────────────
 
@@ -428,6 +433,14 @@ class Pipeline:
         if manifest.get("receipt_id"):
             self.operations.finish_receipt(manifest["receipt_id"], ctx.disposition)
 
+        # If retry() died before its own cleanup ran, the original
+        # failed/<job_id> folder is left behind even though this commit
+        # just superseded it — remove it so Needs Attention doesn't show
+        # a stale failure for an already-archived job.
+        stale_failed = self.config.destination.work_dir / "failed" / ctx.job_id
+        if stale_failed.is_dir() and not stale_failed.is_symlink():
+            shutil.rmtree(stale_failed, ignore_errors=True)
+
         shutil.rmtree(ctx.staging_dir, ignore_errors=True)
         logger.debug("job %s committed to %s", ctx.job_id, dest_path)
         return dest_path
@@ -569,11 +582,14 @@ class Pipeline:
         )
         return PurgeResult(content_removed=content_removed, document_removed=document_removed)
 
-    @serialized
     def run_job(self, pdf_path: Path, metadata_path: Path | None, staging_root: Path) -> JobContext:
-        # A repeat arrival is a distinct receipt but not a distinct document
-        # assessment. Detect it before claiming so an earlier job left staged
-        # during an uncertain emit cannot be overwritten by the same bytes.
+        # Deliberately NOT @serialized: extraction (the slow part) used to
+        # run under the global work_dir lock, blocking every unrelated
+        # purge/retry/resolve/reprocess for as long as it took. commit()/
+        # commit_failed() are still @serialized and idempotent (a repeat
+        # commit sees "stores" already checkpointed and no-ops), so that
+        # boundary is enough. Detect a duplicate arrival before claiming so
+        # an earlier job staged during an uncertain emit isn't overwritten.
         if not pdf_path.is_symlink():
             try:
                 duplicate_bytes, opened_pdf = _read_bounded_with_stat(
@@ -693,12 +709,16 @@ class Pipeline:
 
     # ── crash recovery ───────────────────────────────────────────────
 
-    @serialized
     def resume_staged(self, staging_root: Path, job_id: str | None = None) -> list[JobContext]:
         """Re-claim any job left in `_processing/` by a process that died
-        between claim and commit. job_id is content-derived, so
-        re-running is idempotent — it produces the same identity and the
-        same verdict, not a duplicate.
+        between claim and commit. job_id is content-derived, so re-running
+        is idempotent.
+
+        Deliberately NOT @serialized: a large staged queue would otherwise
+        hold the global lock (and block console readiness) for as long as
+        the whole sweep took. Each job is guarded instead by its own
+        non-blocking job_lock(), so two resumes of the *same* job can't
+        race but unrelated jobs recover in parallel.
         """
         resumed: list[JobContext] = []
         if not staging_root.is_dir():
@@ -713,76 +733,89 @@ class Pipeline:
             if not job_dir.is_dir() or not staged_pdf.is_file():
                 continue
 
-            logger.debug("resume_staged: found staged job %s", job_dir.name)
-            pdf_bytes = staged_pdf.read_bytes()
-            recovered_id = content_job_id(pdf_bytes)
-            if recovered_id != job_dir.name:
-                logger.warning(
-                    "staged job %s content hash is %s — leaving in place for inspection",
+            try:
+                with self.job_lock(job_dir.name, blocking=False):
+                    ctx = self._resume_one(job_dir, staged_pdf)
+            except LockContended:
+                logger.debug(
+                    "resume_staged: job %s is already being handled elsewhere; skipping this pass",
                     job_dir.name,
-                    recovered_id,
                 )
                 continue
-
-            manifest_path = job_dir / "manifest.json"
-            manifest = json.loads(manifest_path.read_text()) if manifest_path.is_file() else {}
-            if "emit_started" in manifest.get("steps", []) and "emitted" not in manifest.get("steps", []):
-                logger.warning("job %s needs explicit delivery retry; leaving staged", recovered_id)
-                continue
-            raw_metadata: dict = extract_pdf_metadata(pdf_bytes)
-            if manifest.get("receipt_id"):
-                self.operations.receipt(
-                    manifest["receipt_id"],
-                    recovered_id,
-                    manifest.get("received_at", datetime.now(UTC).isoformat()),
-                    manifest.get("filename", "document.pdf"),
-                    manifest.get("source_name", self.config.source.name),
-                )
-            meta_files = [
-                p
-                for p in job_dir.iterdir()
-                if p.name.endswith(self.config.source.metadata_suffix)
-            ]
-            if meta_files:
-                content = _read_bounded(meta_files[0], self.config.limits.max_metadata_bytes)
-                if content is None:
-                    logger.warning(
-                        "companion %s exceeds limits.max_metadata_bytes — ignoring it",
-                        meta_files[0].name,
-                    )
-                else:
-                    try:
-                        raw_metadata = {**raw_metadata, **self.metadata_parser.parse(content)}
-                    except Exception as exc:
-                        logger.warning("metadata parse failed resuming %s: %s", job_id, exc)
-
-            ctx = JobContext(
-                job_id=recovered_id,
-                received_at=datetime.fromisoformat(manifest["received_at"]) if manifest.get("received_at") else datetime.fromtimestamp(staged_pdf.stat().st_mtime, UTC),
-                source_name=self.config.source.name,
-                staging_dir=job_dir,
-                pdf_path=staged_pdf,
-                pdf_sha256=hashlib.sha256(pdf_bytes).hexdigest(),
-                metadata=allowlist(raw_metadata, self.config.source.metadata_fields),
-            )
-            if manifest.get("assessment"):
-                assessment = manifest["assessment"]
-                raw_text = assessment["text"]
-                if raw_text is not None:
-                    ctx.text = DocumentText(
-                        **{
-                            **raw_text,
-                            "lines": [TextLine(**line) for line in raw_text["lines"]],
-                        }
-                    )
-                ctx.hits = [DLPHit(**{**hit, "severity": Severity(hit["severity"])}) for hit in assessment["hits"]]
-                ctx.disposition, ctx.reason = assessment["disposition"], assessment["reason"]
-                ctx.metadata, ctx.audit_fields = assessment["metadata"], assessment["audit_fields"]
-            else:
-                self.process(ctx)
-            if ctx.disposition == "failed":
-                self.commit_failed(ctx)
-            else:
-                self.commit(ctx)
-            resumed.append(ctx)
+            if ctx is not None:
+                resumed.append(ctx)
         return resumed
+
+    def _resume_one(self, job_dir: Path, staged_pdf: Path) -> JobContext | None:
+        logger.debug("resume_staged: found staged job %s", job_dir.name)
+        pdf_bytes = staged_pdf.read_bytes()
+        recovered_id = content_job_id(pdf_bytes)
+        if recovered_id != job_dir.name:
+            logger.warning(
+                "staged job %s content hash is %s — leaving in place for inspection",
+                job_dir.name,
+                recovered_id,
+            )
+            return None
+
+        manifest_path = job_dir / "manifest.json"
+        manifest = json.loads(manifest_path.read_text()) if manifest_path.is_file() else {}
+        if "emit_started" in manifest.get("steps", []) and "emitted" not in manifest.get("steps", []):
+            logger.warning("job %s needs explicit delivery retry; leaving staged", recovered_id)
+            return None
+        raw_metadata: dict = extract_pdf_metadata(pdf_bytes)
+        if manifest.get("receipt_id"):
+            self.operations.receipt(
+                manifest["receipt_id"],
+                recovered_id,
+                manifest.get("received_at", datetime.now(UTC).isoformat()),
+                manifest.get("filename", "document.pdf"),
+                manifest.get("source_name", self.config.source.name),
+            )
+        meta_files = [
+            p
+            for p in job_dir.iterdir()
+            if p.name.endswith(self.config.source.metadata_suffix)
+        ]
+        if meta_files:
+            content = _read_bounded(meta_files[0], self.config.limits.max_metadata_bytes)
+            if content is None:
+                logger.warning(
+                    "companion %s exceeds limits.max_metadata_bytes — ignoring it",
+                    meta_files[0].name,
+                )
+            else:
+                try:
+                    raw_metadata = {**raw_metadata, **self.metadata_parser.parse(content)}
+                except Exception as exc:
+                    logger.warning("metadata parse failed resuming %s: %s", recovered_id, exc)
+
+        ctx = JobContext(
+            job_id=recovered_id,
+            received_at=datetime.fromisoformat(manifest["received_at"]) if manifest.get("received_at") else datetime.fromtimestamp(staged_pdf.stat().st_mtime, UTC),
+            source_name=self.config.source.name,
+            staging_dir=job_dir,
+            pdf_path=staged_pdf,
+            pdf_sha256=hashlib.sha256(pdf_bytes).hexdigest(),
+            metadata=allowlist(raw_metadata, self.config.source.metadata_fields),
+        )
+        if manifest.get("assessment"):
+            assessment = manifest["assessment"]
+            raw_text = assessment["text"]
+            if raw_text is not None:
+                ctx.text = DocumentText(
+                    **{
+                        **raw_text,
+                        "lines": [TextLine(**line) for line in raw_text["lines"]],
+                    }
+                )
+            ctx.hits = [DLPHit(**{**hit, "severity": Severity(hit["severity"])}) for hit in assessment["hits"]]
+            ctx.disposition, ctx.reason = assessment["disposition"], assessment["reason"]
+            ctx.metadata, ctx.audit_fields = assessment["metadata"], assessment["audit_fields"]
+        else:
+            self.process(ctx)
+        if ctx.disposition == "failed":
+            self.commit_failed(ctx)
+        else:
+            self.commit(ctx)
+        return ctx
