@@ -67,6 +67,19 @@ stringData:
 Use `configuration.env` for plain values, `extraEnv` for individual
 `secretKeyRef` values, and `extraEnvFrom` for additional Secret sources.
 
+## Logging
+
+```yaml
+logging:
+  level: DEBUG            # DEBUG | INFO (default) | WARNING | ERROR | CRITICAL
+  traceContentOutput: false  # only takes effect when level is also DEBUG
+```
+
+`DEBUG` is safe to run in production. `traceContentOutput` logs actual
+document content (full extracted text, raw unmasked rule matches) and
+requires `level: DEBUG` to also be set — either alone does nothing. Turn it
+on for a deliberate debugging session, not as a standing default.
+
 ## Storage
 
 The five entries under `persistence` accept a storage class, access modes, size,

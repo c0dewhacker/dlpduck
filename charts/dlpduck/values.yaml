@@ -12,6 +12,20 @@ imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
 
+# DEBUG is safe to turn on in production — it traces the pipeline, rule
+# matches and plugin runs, but never a raw document value. See the main
+# README's "Logging" section.
+logging:
+  level: INFO # DEBUG | INFO | WARNING | ERROR | CRITICAL
+  # Logs actual document content (full extracted text, a rule's raw
+  # unmasked match) — but ONLY takes effect when level is also DEBUG;
+  # either alone does nothing. A log stream is usually the least
+  # access-controlled, longest-retained thing in a deployment, which is
+  # exactly what masking and the two-store split exist to keep raw
+  # document content out of. Turn this on for a deliberate, temporary
+  # debugging session — never leave it on as a standing default.
+  traceContentOutput: false
+
 # DLPDuck reads this structure as /etc/dlpduck/config.yaml. Use an existing
 # ConfigMap when you need additional rule files beside config.yaml.
 configuration:

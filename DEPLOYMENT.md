@@ -115,6 +115,30 @@ Non-secret overrides can instead be set under `configuration.env`. Use
 `extraEnv` for individual `secretKeyRef` entries and `extraEnvFrom` for
 additional Secret or ConfigMap sources.
 
+### Logging
+
+`logging.level` (default `INFO`) sets `DLPDUCK_LOG_LEVEL`; `DEBUG` is safe to
+turn on in production — it traces the pipeline, rule matches and plugin runs,
+but never a raw document value:
+
+```yaml
+logging:
+  level: DEBUG
+```
+
+Actual document content — full extracted text, a rule's raw unmasked match —
+needs a second, separate opt-in that only takes effect when `level: DEBUG` is
+also set:
+
+```yaml
+logging:
+  level: DEBUG
+  traceContentOutput: true
+```
+
+Turn this on for a deliberate, temporary debugging session — never leave it
+set as a standing default. See the main README's "Logging" section.
+
 ### Storage
 
 The chart creates separate claims for:
