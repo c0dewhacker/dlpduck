@@ -186,8 +186,8 @@ class Pipeline:
         self.operations.receipt(
             receipt_id, job_id, received_at.isoformat(), pdf_path.name, self.config.source.name
         )
-        self.operations.receipt_metadata(receipt_id, receipt_metadata)
-        self.operations.finish_receipt(receipt_id, "duplicate")
+        self.operations.receipt_metadata(job_id, receipt_id, receipt_metadata)
+        self.operations.finish_receipt(job_id, receipt_id, "duplicate")
         self.audit.append(event, job_id=job_id, receipt_id=receipt_id, source_name=pdf_path.name)
         _unlink_if_same(pdf_path, opened_pdf)
         if metadata_path is not None:
@@ -350,7 +350,7 @@ class Pipeline:
                     )
 
         metadata = allowlist(raw_metadata, self.config.source.metadata_fields)
-        self.operations.receipt_metadata(receipt_id, metadata)
+        self.operations.receipt_metadata(job_id, receipt_id, metadata)
         if content_trace_enabled():
             logger.debug("job %s claimed metadata: %r", job_id, metadata)
         else:
@@ -553,7 +553,7 @@ class Pipeline:
             self.plugins.run(ctx, phase="emit")
             self._checkpoint(ctx, manifest, "emitted")
         if manifest.get("receipt_id"):
-            self.operations.finish_receipt(manifest["receipt_id"], ctx.disposition)
+            self.operations.finish_receipt(ctx.job_id, manifest["receipt_id"], ctx.disposition)
 
         # If retry() died before its own cleanup ran, the original
         # failed/<job_id> folder is left behind even though this commit
@@ -597,7 +597,7 @@ class Pipeline:
             ),
         )
         if manifest.get("receipt_id"):
-            self.operations.finish_receipt(manifest["receipt_id"], "failed")
+            self.operations.finish_receipt(ctx.job_id, manifest["receipt_id"], "failed")
         shutil.rmtree(ctx.staging_dir, ignore_errors=True)
         self._discard_job_lock_dir(ctx.job_id)
         return dest
@@ -780,7 +780,7 @@ class Pipeline:
             prior = existing[0]
             ctx.disposition, ctx.reason = prior["disposition"], "duplicate_receipt"
             manifest = self._manifest(ctx)
-            self.operations.finish_receipt(manifest["receipt_id"], "duplicate")
+            self.operations.finish_receipt(ctx.job_id, manifest["receipt_id"], "duplicate")
             self.audit.append("job.received_again", job_id=ctx.job_id, receipt_id=manifest["receipt_id"])
             shutil.rmtree(ctx.staging_dir)
             logger.debug("job %s is a duplicate receipt of an existing assessment", ctx.job_id)
