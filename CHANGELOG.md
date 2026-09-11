@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.7](https://github.com/c0dewhacker/dlpduck/compare/v0.1.6...v0.1.7) (2026-09-11)
+
+
+### Features
+
+* **chart:** first-class logging.level / logging.traceContentOutput values ([72dfaec](https://github.com/c0dewhacker/dlpduck/commit/72dfaec548deb93c59266de9dd93d801c910c0d9))
+* configurable log level, and a double-gated switch for content tracing ([cfd5df5](https://github.com/c0dewhacker/dlpduck/commit/cfd5df57c4149f42d4211a78edad0e9cf1a7e5b8))
+* configurable log level, and a double-gated switch for content tracing ([ba4ed70](https://github.com/c0dewhacker/dlpduck/commit/ba4ed7049a82118a2b355fc9e259590ecaa661c2))
+
 ## [0.1.6](https://github.com/c0dewhacker/dlpduck/compare/v0.1.5...v0.1.6) (2026-09-10)
 
 
