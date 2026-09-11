@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 import pypdfium2 as pdfium
@@ -11,6 +12,8 @@ from rapidocr_onnxruntime import RapidOCR
 
 from dlpduck.pdfium import PDFIUM_LOCK, is_password_error, open_document
 from dlpduck.types import DocumentText, EncryptedDocument, PageTooLarge, TextLine
+
+logger = logging.getLogger("dlpduck.extract")
 
 
 @dataclass
@@ -67,6 +70,7 @@ class LineExtractor:
                     try:
                         rows, source, conf = self._page_rows(page)
                     except Exception:
+                        logger.debug("page %d failed to extract", idx + 1, exc_info=True)
                         out.degraded = True  # -> quarantine, never silently drop a page
                         out.failed_page_count += 1
                         continue
@@ -76,6 +80,11 @@ class LineExtractor:
                         out.degraded = True
                     if source == "ocr":
                         out.ocr_page_count += 1
+                    logger.debug(
+                        "page %d: %s, %d line(s)%s",
+                        idx + 1, source, len(rows),
+                        f", confidence={conf:.2f}" if conf is not None else "",
+                    )
                     for on_page, text in enumerate(rows):
                         out.add_line(
                             TextLine(

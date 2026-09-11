@@ -7,12 +7,15 @@ The database and lock belong on the local work volume, not a network share.
 from __future__ import annotations
 
 import functools
+import logging
 import os
 import sqlite3
 import threading
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+
+logger = logging.getLogger("dlpduck.operations")
 
 _LOCAL_LOCKS: dict[str, threading.RLock] = {}
 _REGISTRY_LOCK = threading.Lock()
@@ -139,6 +142,7 @@ class OperationalStore:
         with self.connect() as db:
             db.execute("DELETE FROM sessions WHERE expires < ?", (datetime.now(UTC).timestamp(),))
             db.execute("INSERT INTO sessions VALUES (?, ?, ?)", (token, username, expires))
+        logger.debug("session created for %s, expires=%s", username, expires)  # never the token
 
     def session_active(self, token, username):
         with self.connect() as db:
@@ -154,5 +158,7 @@ class OperationalStore:
         with self.connect() as db:
             if token:
                 db.execute("DELETE FROM sessions WHERE token=?", (token,))
+                logger.debug("session revoked by token")  # never the token itself
             elif username:
                 db.execute("DELETE FROM sessions WHERE username=?", (username,))
+                logger.debug("all sessions revoked for %s", username)

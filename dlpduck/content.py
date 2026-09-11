@@ -13,6 +13,7 @@ depended on the document or its text existing.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,6 +24,8 @@ import pyarrow.parquet as pq
 from dlpduck.durability import atomic_write
 from dlpduck.schema import CONTENT_SCHEMA
 from dlpduck.types import DocumentText, JobContext, TextLine
+
+logger = logging.getLogger("dlpduck.content")
 
 # Job ids are content-derived (blake2b, digest_size=16 — see
 # pipeline.content_job_id), so they are always exactly 32 hex characters.
@@ -83,6 +86,7 @@ def write_content_row(content_root: Path, ctx: JobContext) -> Path:
     # until someone found and deleted it.
     with atomic_write(out_path) as tmp:
         pq.write_table(table, tmp, compression="snappy")
+    logger.debug("wrote content row for job %s (%d line(s)) to %s", ctx.job_id, len(lines), out_path)
     return out_path
 
 
@@ -100,6 +104,7 @@ def read_document_text(content_root: Path, job_id: str) -> DocumentText | None:
     validate_job_id(job_id)
     matches = list(Path(content_root).glob(f"dt=*/{job_id}.parquet"))
     if not matches:
+        logger.debug("no content row for job %s (purged, or never existed)", job_id)
         return None
     row = pq.read_table(matches[0]).to_pylist()[0]
     doc = DocumentText()
@@ -129,6 +134,7 @@ def purge_content(content_root: Path, job_id: str) -> bool:
     matches = list(Path(content_root).glob(f"dt=*/{job_id}.parquet"))
     for path in matches:
         path.unlink()
+    logger.debug("purge_content(%s): removed %d file(s)", job_id, len(matches))
     return bool(matches)
 
 

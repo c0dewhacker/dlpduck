@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 import pyarrow.parquet as pq
@@ -717,3 +718,40 @@ class TestPurgeRecordsIntentBeforeDeleting:
         assert not [e for e in events if e["event"] == "content.purged"]
         # ...and an operator can see the content really is gone.
         assert not list(pipeline.content_root.glob(f"dt=*/{ctx.job_id}.parquet"))
+
+
+class TestContentTracing:
+    """The end-to-end version of tests/test_tracing.py's unit tests: a real
+    document through the real pipeline, checking what actually lands in
+    the log records rather than trusting the helper function in isolation.
+    """
+
+    SECRET_LINE = "Card 4111 1111 1111 1111 on file"
+
+    def _run(self, config, monkeypatch, caplog, *, debug: bool, trace_flag: bool):
+        if trace_flag:
+            monkeypatch.setenv("DLPDUCK_TRACE_CONTENT_OUTPUT", "true")
+        else:
+            monkeypatch.delenv("DLPDUCK_TRACE_CONTENT_OUTPUT", raising=False)
+        level = logging.DEBUG if debug else logging.INFO
+        caplog.set_level(level, logger="dlpduck")
+        pipeline = Pipeline(config)
+        pdf = _pdf(config.source.path / "card.pdf", [self.SECRET_LINE])
+        pipeline.run_job(pdf, None, config.destination.work_dir / "_processing")
+        return "\n".join(r.getMessage() for r in caplog.records)
+
+    def test_debug_alone_never_logs_document_text(self, config, monkeypatch, caplog):
+        text = self._run(config, monkeypatch, caplog, debug=True, trace_flag=False)
+        assert self.SECRET_LINE not in text
+        assert "4111" not in text
+        assert "extracted 1 page" in text  # the safe, structural DEBUG line is still there
+
+    def test_flag_alone_never_logs_document_text(self, config, monkeypatch, caplog):
+        text = self._run(config, monkeypatch, caplog, debug=False, trace_flag=True)
+        assert self.SECRET_LINE not in text
+        assert "4111" not in text
+
+    def test_both_together_log_the_line_and_the_raw_match(self, config, monkeypatch, caplog):
+        text = self._run(config, monkeypatch, caplog, debug=True, trace_flag=True)
+        assert self.SECRET_LINE in text
+        assert "4111 1111 1111 1111" in text  # the raw (unmasked) matched value

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 import sys
 import tempfile
@@ -9,6 +10,8 @@ from dataclasses import asdict
 from pathlib import Path
 
 from dlpduck.types import DocumentText, EncryptedDocument, TextLine
+
+logger = logging.getLogger("dlpduck.extract_worker")
 
 
 def extract_isolated(pdf_bytes: bytes, dpi: int, min_chars: int, timeout: float) -> DocumentText:
@@ -22,6 +25,15 @@ def extract_isolated(pdf_bytes: bytes, dpi: int, min_chars: int, timeout: float)
             )
         except subprocess.TimeoutExpired:
             raise TimeoutError(f"extraction exceeded {timeout:g} seconds") from None
+        # The worker configures its own logging (see main()) and writes it
+        # to its own stderr, which subprocess.run captured above rather
+        # than let inherit straight through — so without this, everything
+        # the worker logged (including its own traceback on a crash) was
+        # silently discarded the moment the pipe closed, worker after
+        # worker, regardless of DLPDUCK_LOG_LEVEL.
+        if result.stderr:
+            level = logging.DEBUG if result.returncode == 0 else logging.WARNING
+            logger.log(level, "extraction worker output:\n%s", result.stderr.decode(errors="replace"))
         if result.returncode == 3:
             raise EncryptedDocument()
         if result.returncode or not result_path.is_file():
@@ -32,7 +44,9 @@ def extract_isolated(pdf_bytes: bytes, dpi: int, min_chars: int, timeout: float)
 
 def main():
     from dlpduck.extract import LineExtractor
+    from dlpduck.tracing import configure_logging
 
+    configure_logging()
     extractor = LineExtractor(dpi=int(sys.argv[2]))
     extractor.NATIVE_MIN_CHARS = int(sys.argv[3])
     try:

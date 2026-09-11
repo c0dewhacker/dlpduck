@@ -38,6 +38,7 @@ carrying the old ones forward.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -52,6 +53,8 @@ from dlpduck.engine import DLPEngine
 from dlpduck.index import AssessmentExists, write_row
 from dlpduck.operations import serialized
 from dlpduck.types import DLPHit, DocumentText, JobContext, TextLine
+
+logger = logging.getLogger("dlpduck.reprocess")
 
 Direction = Literal["escalate", "deescalate", "changed", "unchanged", "content_unavailable"]
 Mode = Literal["rules", "extract"]
@@ -403,6 +406,7 @@ class Reprocessor:
         self._recover_transitions()
         rows = self._scope_rows(job_ids, start, end)
         summary = ReprocessSummary(ruleset_version=self.ruleset_version, scope_size=len(rows))
+        logger.debug("reprocess (mode=%s): %d job(s) in scope", mode, len(rows))
 
         self.audit.append(
             "reprocess.started",
@@ -452,6 +456,11 @@ class Reprocessor:
             deescalated=summary.count("deescalate"),
             content_unavailable=summary.count("content_unavailable"),
         )
+        logger.debug(
+            "reprocess (mode=%s) done: %d written, %d escalated, %d deescalated, %d unavailable",
+            mode, summary.written, summary.count("escalate"), summary.count("deescalate"),
+            summary.count("content_unavailable"),
+        )
         return summary
 
     @serialized
@@ -462,6 +471,7 @@ class Reprocessor:
         prior `commit()` already made and recorded as release_pending;
         the verdict itself isn't reconsidered here.
         """
+        logger.debug("release requested for job %s by %s", job_id, actor)
         rows = latest_index_rows(self.index_root, job_ids=[job_id])
         if not rows:
             return ReleaseResult(job_id=job_id, released=False, reason_denied="job not found")

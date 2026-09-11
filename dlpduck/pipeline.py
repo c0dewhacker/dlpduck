@@ -36,6 +36,7 @@ from dlpduck.pdf_metadata import extract_pdf_metadata
 from dlpduck.pdfium import page_count
 from dlpduck.plugins.base import PluginError, PluginRunner
 from dlpduck.rules import ruleset_version
+from dlpduck.tracing import content_trace_enabled
 from dlpduck.types import (
     DLPHit,
     DocumentText,
@@ -130,6 +131,7 @@ class Pipeline:
         # otherwise be followed straight through to whatever it points at,
         # and that file's contents would end up extracted into the content
         # store — searchable, and downloadable through the console.
+        logger.debug("claiming %s (source=%s)", pdf_path.name, self.config.source.name)
         pdf_bytes, opened_pdf = _read_bounded_with_stat(
             pdf_path, self.config.limits.max_bytes
         )
@@ -222,6 +224,10 @@ class Pipeline:
 
         metadata = allowlist(raw_metadata, self.config.source.metadata_fields)
         self.operations.receipt_metadata(receipt_id, metadata)
+        if content_trace_enabled():
+            logger.debug("job %s claimed metadata: %r", job_id, metadata)
+        else:
+            logger.debug("job %s claimed with %d metadata field(s) kept", job_id, len(metadata))
 
         return JobContext(
             job_id=job_id,
@@ -251,6 +257,7 @@ class Pipeline:
             )
             return
 
+        logger.debug("job %s extracting (%d bytes)", ctx.job_id, len(pdf_bytes))
         try:
             ctx.text = self.extractor.extract(pdf_bytes)
         except EncryptedDocument:
@@ -263,6 +270,17 @@ class Pipeline:
             ctx.reason = f"extraction_error: {exc}"
             self.audit.append("job.failed", job_id=ctx.job_id, reason=ctx.reason)
             return
+        logger.debug(
+            "job %s extracted %d page(s), %d via OCR, degraded=%s",
+            ctx.job_id, ctx.text.page_count, ctx.text.ocr_page_count, ctx.text.degraded,
+        )
+        if content_trace_enabled():
+            for line in ctx.text.lines:
+                logger.debug(
+                    "job %s p%d L%d (%s, conf=%s): %r",
+                    ctx.job_id, line.page_number, line.line_number,
+                    line.source, line.confidence, line.text,
+                )
 
         try:
             ctx.hits = self.engine.scan(ctx.text)
@@ -273,6 +291,7 @@ class Pipeline:
                 "job.failed", job_id=ctx.job_id, reason=ctx.reason, rule_id=exc.rule_id
             )
             return
+        logger.debug("job %s scanned: %d hit(s)", ctx.job_id, len(ctx.hits))
 
         # Enrich runs before disposition so it can inform routing (e.g. a
         # department attached here could feed a future per-department
@@ -292,6 +311,7 @@ class Pipeline:
         if ctx.text is None:
             raise ValueError("Cannot assess a document without extraction")
         ctx.disposition, ctx.reason = decide(ctx.text, ctx.hits, self.config.dlp.quarantine_on_degraded)
+        logger.debug("job %s disposition: %s (%s)", ctx.job_id, ctx.disposition, ctx.reason)
 
     # ── commit ───────────────────────────────────────────────────────
 
@@ -409,12 +429,14 @@ class Pipeline:
             self.operations.finish_receipt(manifest["receipt_id"], ctx.disposition)
 
         shutil.rmtree(ctx.staging_dir, ignore_errors=True)
+        logger.debug("job %s committed to %s", ctx.job_id, dest_path)
         return dest_path
 
     @serialized
     def commit_failed(self, ctx: JobContext) -> Path:
         """Route an unprocessable job to failed/ for operator attention
         rather than losing it or pretending it succeeded."""
+        logger.debug("job %s committing to failed/: %s", ctx.job_id, ctx.reason)
         manifest = self._manifest(ctx)
         self._snapshot_assessment(ctx, manifest)
         failed_root = self.config.destination.work_dir / "failed" / ctx.job_id
@@ -660,6 +682,7 @@ class Pipeline:
             self.operations.finish_receipt(manifest["receipt_id"], "duplicate")
             self.audit.append("job.received_again", job_id=ctx.job_id, receipt_id=manifest["receipt_id"])
             shutil.rmtree(ctx.staging_dir)
+            logger.debug("job %s is a duplicate receipt of an existing assessment", ctx.job_id)
             return ctx
         self.process(ctx)
         if ctx.disposition == "failed":
@@ -690,6 +713,7 @@ class Pipeline:
             if not job_dir.is_dir() or not staged_pdf.is_file():
                 continue
 
+            logger.debug("resume_staged: found staged job %s", job_dir.name)
             pdf_bytes = staged_pdf.read_bytes()
             recovered_id = content_job_id(pdf_bytes)
             if recovered_id != job_dir.name:

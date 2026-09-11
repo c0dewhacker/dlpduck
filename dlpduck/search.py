@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import re
 import threading
 import time
@@ -37,8 +38,10 @@ from typing import Any
 
 import duckdb
 
+from dlpduck.tracing import content_trace_enabled
 from dlpduck.types import Severity
 
+logger = logging.getLogger("dlpduck.search")
 SEVERITIES = {s.value for s in Severity}
 MAX_QUERY_CHARS = 128
 MAX_LIMIT = 1000
@@ -215,6 +218,11 @@ def search(
         )
         for r in rows
     ]
+    logger.debug(
+        "search: %d result(s) in %.3fs (truncated=%s) for query=%s",
+        len(results), elapsed, truncated,
+        repr(q) if content_trace_enabled() else f"<{len(q)} char(s), redacted>",
+    )
     return SearchResponse(
         results=results,
         elapsed_seconds=elapsed,

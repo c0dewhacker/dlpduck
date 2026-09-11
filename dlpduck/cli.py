@@ -24,10 +24,11 @@ from dlpduck.reprocess import Reprocessor, parse_mode
 from dlpduck.retention import apply_retention, plan_retention
 from dlpduck.search import QueryTimeout, SearchError, audit_terms
 from dlpduck.search import search as run_search
+from dlpduck.tracing import configure_logging
 from dlpduck.types import EncryptedDocument, RuleBudgetExceeded
 from dlpduck.watcher import Watcher
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+configure_logging()
 
 
 @click.group()

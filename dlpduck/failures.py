@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import tempfile
@@ -11,6 +12,8 @@ from dlpduck.content import validate_job_id
 from dlpduck.durability import copy_durably, write_atomically
 from dlpduck.operations import serialized
 from dlpduck.types import DocumentTooLarge, UnsafeSourceFile
+
+logger = logging.getLogger("dlpduck.failures")
 
 
 class FailureQueue:
@@ -69,9 +72,11 @@ class FailureQueue:
         self.pipeline.audit.append(
             "job.failure_resolved", job_id=job_id, reason=reason, actor=actor, kind=kind
         )
+        logger.debug("failure queue: %s %s resolved by %s", kind, job_id, actor)
 
     @serialized
     def retry(self, kind, job_id, reason, actor, confirm_delivery=False):
+        logger.debug("failure queue: retry requested for %s %s by %s", kind, job_id, actor)
         if not reason.strip():
             raise ValueError("A reason is required")
         folder = self.folder(kind, job_id)

@@ -95,6 +95,30 @@ export DLPDUCK_SESSION_SECRET="$(openssl rand -hex 32)"  # console cookie signin
 `DLPDUCK_HMAC_KEY` must be stable for the life of a deployment and must never be
 written into config, the archive, or the audit trail.
 
+### Logging
+
+```bash
+export DLPDUCK_LOG_LEVEL=DEBUG   # DEBUG | INFO (default) | WARNING | ERROR | CRITICAL
+```
+
+DEBUG is safe to turn on in production — it traces the pipeline (claim,
+extract, scan, disposition, commit), rule match counts, and plugin runs, but
+never a raw document value. `DLPDUCK_LOG_LEVEL` set to something unrecognised
+refuses to start rather than silently falling back to a default.
+
+Actual document content — full extracted text, and a rule's raw (unmasked)
+match — is behind a second, independent switch:
+
+```bash
+export DLPDUCK_TRACE_CONTENT_OUTPUT=true
+```
+
+This does nothing unless `DLPDUCK_LOG_LEVEL=DEBUG` is *also* set — either one
+alone is inert. Logs are typically the least access-controlled, longest
+-retained thing in a deployment, which is exactly what `masking.py` and the
+whole two-store split exist to keep raw document content out of; this flag
+is for a deliberate, temporary debugging session, not a standing setting.
+
 ---
 
 ## Docker
