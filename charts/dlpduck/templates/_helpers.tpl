@@ -59,6 +59,13 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- printf "%s:%s" .Values.image.repository (.Values.image.tag | default .Chart.AppVersion) }}
 {{- end }}
 
+{{/* "none" | "kubernetes" — read straight out of the opaque configuration.data
+blob rather than duplicating it as a separate Helm value, so there is exactly
+one place this gets set. Drives the service account token mount and RBAC. */}}
+{{- define "dlpduck.leaderElection" -}}
+{{- dig "cluster" "leader_election" "none" .Values.configuration.data }}
+{{- end }}
+
 {{- define "dlpduck.claimName" -}}
 {{- $root := index . 0 -}}
 {{- $store := index . 1 -}}

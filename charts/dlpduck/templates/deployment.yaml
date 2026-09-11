@@ -6,9 +6,16 @@ metadata:
   labels:
     {{- include "dlpduck.labels" . | nindent 4 }}
 spec:
-  replicas: 1
+  replicas: {{ .Values.replicaCount }}
   strategy:
-    type: Recreate
+    # One replica keeps the original guarantee (a terminating pod is
+    # fully gone before its replacement starts) for anyone who hasn't
+    # opted into more. More than one only makes sense once
+    # configuration.data.cluster.leader_election is set to "kubernetes" —
+    # RollingUpdate is safe there because a terminating pod releases its
+    # lease as part of graceful shutdown (see dlpduck.leader), letting a
+    # new replica take over promptly instead of waiting out the lease.
+    type: {{ if gt (.Values.replicaCount | int) 1 }}RollingUpdate{{ else }}Recreate{{ end }}
   selector:
     matchLabels:
       {{- include "dlpduck.selectorLabels" . | nindent 6 }}
@@ -32,7 +39,9 @@ spec:
         {{- end }}
     spec:
       serviceAccountName: {{ include "dlpduck.serviceAccountName" . }}
-      automountServiceAccountToken: false
+      # Only mounted for Kubernetes-Lease leader election, which is the
+      # one thing in this image that talks to the API server at all.
+      automountServiceAccountToken: {{ eq (include "dlpduck.leaderElection" .) "kubernetes" }}
       terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
@@ -50,6 +59,13 @@ spec:
               value: "true"
             - name: PYTHONDONTWRITEBYTECODE
               value: "1"
+            # Falls back to $HOSTNAME (already the pod name in a
+            # Deployment) if unset — set explicitly so leader election's
+            # identity survives even where that fallback doesn't hold.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
             - name: DLPDUCK_LOG_LEVEL
               value: {{ .Values.logging.level | quote }}
             {{- if .Values.logging.traceContentOutput }}

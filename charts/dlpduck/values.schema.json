@@ -1,8 +1,9 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
   "type": "object",
-  "required": ["image", "logging", "configuration", "secrets", "persistence", "service"],
+  "required": ["replicaCount", "image", "logging", "configuration", "secrets", "persistence", "service"],
   "properties": {
+    "replicaCount": {"type": "integer", "minimum": 1},
     "logging": {
       "type": "object",
       "required": ["level", "traceContentOutput"],
