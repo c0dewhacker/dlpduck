@@ -108,6 +108,11 @@ class Watcher:
         for stale in set(self._tracked) - seen_this_poll:
             del self._tracked[stale]
 
+        if seen_this_poll or self._tracked:
+            logger.debug(
+                "poll: %d candidate(s) seen, %d ready, %d still stabilising",
+                len(seen_this_poll), len(ready), len(self._tracked),
+            )
         return ready
 
     def run_forever(self, stop_event=None) -> None:

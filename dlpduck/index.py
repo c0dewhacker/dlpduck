@@ -11,6 +11,7 @@ overwritten — `write_index_row` is the normal ingest path (assessment_seq
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -22,6 +23,8 @@ import pyarrow.parquet as pq
 from dlpduck.durability import FileAlreadyExists, atomic_write
 from dlpduck.schema import INDEX_SCHEMA
 from dlpduck.types import JobContext
+
+logger = logging.getLogger("dlpduck.index")
 
 
 def index_row(
@@ -127,7 +130,9 @@ def write_row(
         with atomic_write(out_path, exclusive=exclusive) as tmp:
             pq.write_table(table, tmp, compression="snappy")
     except FileAlreadyExists:
+        logger.debug("write_row: assessment %s#%d already exists", job_id, assessment_seq)
         raise AssessmentExists(out_path) from None
+    logger.debug("wrote index row: job=%s assessment=%d -> %s", job_id, assessment_seq, out_path)
     return out_path
 
 
@@ -222,4 +227,8 @@ def compact_partition(plan: CompactionPlan) -> int:
             continue
         reclaimed += path.stat().st_size
         path.unlink()
-    return reclaimed - out_path.stat().st_size
+    reclaimed -= out_path.stat().st_size
+    logger.debug(
+        "compacted %s: %d file(s) -> 1, %d byte(s) reclaimed", plan.partition, len(plan.files), reclaimed
+    )
+    return reclaimed

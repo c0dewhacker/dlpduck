@@ -50,6 +50,12 @@ spec:
               value: "true"
             - name: PYTHONDONTWRITEBYTECODE
               value: "1"
+            - name: DLPDUCK_LOG_LEVEL
+              value: {{ .Values.logging.level | quote }}
+            {{- if .Values.logging.traceContentOutput }}
+            - name: DLPDUCK_TRACE_CONTENT_OUTPUT
+              value: "true"
+            {{- end }}
             {{- range $name, $value := .Values.configuration.env }}
             - name: {{ $name }}
               value: {{ $value | quote }}

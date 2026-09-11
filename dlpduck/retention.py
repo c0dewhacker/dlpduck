@@ -19,6 +19,7 @@ verify() would report an authorized trim as if it were tampering.
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 from dataclasses import dataclass, field
 from datetime import date, timedelta
@@ -26,6 +27,8 @@ from pathlib import Path
 
 from dlpduck.audit import AuditLog
 from dlpduck.config import Config
+
+logger = logging.getLogger("dlpduck.retention")
 
 
 @dataclass
@@ -129,6 +132,7 @@ def apply_retention(plans: list[RetentionPlan], audit: AuditLog) -> int:
         for path in plan.eligible:
             shutil.rmtree(path)
             removed += 1
+        logger.debug("retention: removed %d partition(s) from %s (cutoff=%s)", len(plan.eligible), plan.store, plan.cutoff)
         # Retention is a deletion of evidence, so it is itself evidence:
         # without this, "the document from March is gone" has no recorded
         # explanation, and a policy-driven delete is indistinguishable

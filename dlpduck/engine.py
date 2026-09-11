@@ -5,11 +5,15 @@ stored.
 
 from __future__ import annotations
 
+import logging
 import time
 
 from dlpduck.masking import correlate, mask
 from dlpduck.rules import Rule
+from dlpduck.tracing import content_trace_enabled
 from dlpduck.types import DLPHit, DocumentText, RuleBudgetExceeded, TextLine
+
+logger = logging.getLogger("dlpduck.engine")
 
 
 class _Budget:
@@ -56,6 +60,7 @@ class DLPEngine:
         hits: list[DLPHit] = []
         for rule in self.rules:
             budget = _Budget(self.rule_budget_seconds)
+            before = len(hits)
             try:
                 if rule.scope == "line":
                     hits.extend(self._scan_lines(rule, text, budget))
@@ -63,6 +68,9 @@ class DLPEngine:
                     hits.extend(self._scan_document(rule, text, budget))
             except TimeoutError:
                 raise RuleBudgetExceeded(rule.id) from None
+            found = len(hits) - before
+            if found:
+                logger.debug("rule %s: %d hit(s)", rule.id, found)
         return hits
 
     def _scan_lines(self, rule: Rule, text: DocumentText, budget: _Budget) -> list[DLPHit]:
@@ -117,6 +125,16 @@ class DLPEngine:
         return False
 
     def _hit(self, rule: Rule, line: TextLine, start: int, end: int, raw: str) -> DLPHit:
+        # The one place in this module the raw matched value exists as a
+        # value rather than a position — gated the same as pipeline.py's
+        # full-document dump, and off by default for the same reason:
+        # DLPHit itself deliberately never carries `raw`, only the masked
+        # form and a keyed digest.
+        if content_trace_enabled():
+            logger.debug(
+                "rule %s matched p%d L%d [%d:%d]: %r",
+                rule.id, line.page_number, line.line_number, start, end, raw,
+            )
         return DLPHit(
             rule_id=rule.id,
             rule_name=rule.name,
