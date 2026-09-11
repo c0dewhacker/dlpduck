@@ -70,6 +70,49 @@ class SpoolingSink(Plugin):
         return self.spool.drain(self.deliver)
 
 
+def _job_payload(ctx: JobContext) -> dict[str, Any]:
+    """The one shape both sinks send. Everything here is already masked
+    or allowlisted well before it reaches a plugin — `metadata` is the
+    same allowlisted subset that lands in the permanent index row, and
+    DLPHit has no field to put a raw matched value in even if a plugin
+    wanted one — so there's nothing new to guard by leaving a field out;
+    leaving one out just means a SIEM can't see it.
+    """
+    text = ctx.text
+    return {
+        "event": "job.completed",
+        "job_id": ctx.job_id,
+        "received_at": ctx.received_at.isoformat(),
+        "disposition": ctx.disposition,
+        "reason": ctx.reason,
+        "page_count": text.page_count if text else None,
+        "ocr_page_count": text.ocr_page_count if text else None,
+        "failed_page_count": text.failed_page_count if text else None,
+        "degraded": text.degraded if text else None,
+        "highest_severity": ctx.highest_severity.value if ctx.highest_severity else None,
+        "hit_count": len(ctx.hits),
+        "hits": [
+            {
+                "rule_id": h.rule_id,
+                "rule_name": h.rule_name,
+                "severity": h.severity.value,
+                "action": h.action,
+                "page_number": h.page_number,
+                "line_number": h.line_number,
+                "masked_text": h.masked_text,
+                # Keyed digest for correlating the same sensitive value
+                # across documents without ever exposing it — the whole
+                # reason match_hmac exists.
+                "match_hmac": h.match_hmac,
+                "validator": h.validator,
+            }
+            for h in ctx.hits
+        ],
+        "metadata": ctx.metadata,
+        "audit_fields": ctx.audit_fields,
+    }
+
+
 class SyslogSink(SpoolingSink):
     default_name = "syslog"
 
@@ -104,14 +147,13 @@ class SyslogSink(SpoolingSink):
                 s.sendall(data + b"\n")
 
     def _format(self, ctx: JobContext) -> str:
-        # RFC 5424-ish. facility=1 (user-level), severity=6 (informational)
-        # -> pri = facility*8 + severity = 14.
-        highest = ctx.highest_severity.value if ctx.highest_severity else "NONE"
-        return (
-            f"<14>1 {ctx.received_at.isoformat()} dlpduck dlpduck - {ctx.job_id} "
-            f'[dlpduck disposition="{ctx.disposition}" severity="{highest}" '
-            f'hits="{len(ctx.hits)}"]'
-        )
+        # RFC 5424 header (facility=1 user-level, severity=6 informational
+        # -> pri=14) with no structured-data and the full payload as MSG —
+        # a collector that only wants the header still gets a real
+        # timestamp/MSGID to route on; one that parses MSG as JSON gets
+        # everything build()/WebhookSink also send.
+        payload = json.dumps(_job_payload(ctx), sort_keys=True)
+        return f"<14>1 {ctx.received_at.isoformat()} dlpduck dlpduck - job.completed - {payload}"
 
 
 _REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
@@ -156,17 +198,7 @@ class WebhookSink(SpoolingSink):
         self._opener = urllib.request.build_opener(_NoRedirects)
 
     def build(self, ctx: JobContext) -> dict[str, Any]:
-        return {
-            "job_id": ctx.job_id,
-            "received_at": ctx.received_at.isoformat(),
-            "disposition": ctx.disposition,
-            "highest_severity": ctx.highest_severity.value if ctx.highest_severity else None,
-            "hit_count": len(ctx.hits),
-            "hits": [
-                {"rule_id": h.rule_id, "severity": h.severity.value, "masked_text": h.masked_text}
-                for h in ctx.hits
-            ],
-        }
+        return _job_payload(ctx)
 
     def deliver(self, payload: dict[str, Any]) -> None:
         body = json.dumps(payload, sort_keys=True).encode("utf-8")

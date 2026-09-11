@@ -201,6 +201,32 @@ class TestSyslogSink:
         assert "CRITICAL" in message
         assert ctx.job_id in message
 
+    def test_message_is_a_real_rfc5424_header_with_a_json_body(self):
+        from dlpduck.types import DLPHit, Severity
+
+        ctx = _ctx(
+            hits=[
+                DLPHit(
+                    rule_id="us_ssn", rule_name="US SSN", severity=Severity.HIGH,
+                    action="quarantine", page_number=1, line_number=14, line_on_page=0,
+                    start=0, end=11, masked_text="***-**-6789", match_hmac="a3f9e1c2",
+                    validator="luhn_ssn",
+                )
+            ],
+            metadata={"device_id": "MFP-3F-04", "department": "Finance"},
+        )
+        sink = SyslogSink(host="127.0.0.1")
+        message = sink.build(ctx)["message"]
+
+        header, _, body = message.partition(" - job.completed - ")
+        assert header.startswith("<14>1 ")
+        payload = json.loads(body)
+        # This must carry everything WebhookSink does — same builder.
+        assert payload["job_id"] == ctx.job_id
+        assert payload["metadata"] == {"device_id": "MFP-3F-04", "department": "Finance"}
+        assert payload["hits"][0]["match_hmac"] == "a3f9e1c2"
+        assert payload["hits"][0]["validator"] == "luhn_ssn"
+
     def test_tcp_connection_refused_spools_and_raises(self, tmp_path):
         # Port 1 is refused without root on any normal system — a reliable
         # stand-in for "the SIEM endpoint is down" without mocking sockets.
@@ -215,6 +241,16 @@ class TestSyslogSink:
 
 
 class TestWebhookSink:
+    def test_build_includes_document_metadata_and_extraction_stats(self):
+        ctx = _ctx(metadata={"device_id": "MFP-3F-04", "department": "Finance"})
+        ctx.disposition = "archive"
+        sink = WebhookSink(url="https://example.invalid/hook")
+        payload = sink.build(ctx)
+
+        assert payload["metadata"] == {"device_id": "MFP-3F-04", "department": "Finance"}
+        assert payload["page_count"] == 1
+        assert payload["event"] == "job.completed"
+
     def test_build_never_includes_a_raw_matched_value(self):
         from dlpduck.types import DLPHit, Severity
 
@@ -233,8 +269,14 @@ class TestWebhookSink:
         assert payload["hits"][0]["masked_text"] == "••••••••••••1234"
         # A hit forwarded to a SIEM carries the masked form and the keyed
         # digest, never the value itself — and DLPHit has nowhere to put
-        # one, which is the actual guarantee being pinned here.
-        assert set(payload["hits"][0]) == {"rule_id", "severity", "masked_text"}
+        # one, which is the actual guarantee being pinned here. start/end
+        # (character offsets into extracted text, meaningless without the
+        # text itself) are the only DLPHit fields deliberately left out;
+        # everything else it carries is safe to forward and now is.
+        assert set(payload["hits"][0]) == {
+            "rule_id", "rule_name", "severity", "action", "page_number",
+            "line_number", "masked_text", "match_hmac", "validator",
+        }
         assert "4111111111111234" not in str(payload)
 
     def test_unreachable_host_spools_and_raises(self, tmp_path):
