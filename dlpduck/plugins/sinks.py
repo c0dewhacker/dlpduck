@@ -70,16 +70,69 @@ class SpoolingSink(Plugin):
         return self.spool.drain(self.deliver)
 
 
+def _job_payload(ctx: JobContext) -> dict[str, Any]:
+    """The one shape both sinks send. Everything here is already masked
+    or allowlisted well before it reaches a plugin — `metadata` is the
+    same allowlisted subset that lands in the permanent index row, and
+    DLPHit has no field to put a raw matched value in even if a plugin
+    wanted one — so there's nothing new to guard by leaving a field out;
+    leaving one out just means a SIEM can't see it.
+    """
+    text = ctx.text
+    return {
+        "event": "job.completed",
+        "job_id": ctx.job_id,
+        "received_at": ctx.received_at.isoformat(),
+        "disposition": ctx.disposition,
+        "reason": ctx.reason,
+        "page_count": text.page_count if text else None,
+        "ocr_page_count": text.ocr_page_count if text else None,
+        "failed_page_count": text.failed_page_count if text else None,
+        "degraded": text.degraded if text else None,
+        "highest_severity": ctx.highest_severity.value if ctx.highest_severity else None,
+        "hit_count": len(ctx.hits),
+        "hits": [
+            {
+                "rule_id": h.rule_id,
+                "rule_name": h.rule_name,
+                "severity": h.severity.value,
+                "action": h.action,
+                "page_number": h.page_number,
+                "line_number": h.line_number,
+                "masked_text": h.masked_text,
+                # Keyed digest for correlating the same sensitive value
+                # across documents without ever exposing it — the whole
+                # reason match_hmac exists.
+                "match_hmac": h.match_hmac,
+                "validator": h.validator,
+            }
+            for h in ctx.hits
+        ],
+        "metadata": ctx.metadata,
+        "audit_fields": ctx.audit_fields,
+    }
+
+
 class SyslogSink(SpoolingSink):
     default_name = "syslog"
 
-    def __init__(self, host: str, port: int = 514, protocol: str = "udp", **kwargs):
+    def __init__(
+        self, host: str, port: int = 514, protocol: str = "udp", max_message_bytes: int = 8192, **kwargs
+    ):
         super().__init__(**kwargs)
         if protocol not in ("udp", "tcp"):
             raise ValueError(f"syslog protocol must be 'udp' or 'tcp', got {protocol!r}")
         self.host = host
         self.port = port
         self.protocol = protocol
+        # A document with many hits produces a hits[] array with no
+        # inherent size limit, unlike the old fixed-size line this
+        # replaced — and unlike WebhookSink's HTTP body, a UDP datagram
+        # has a hard ceiling (65507 bytes) and most real collectors
+        # enforce a far smaller practical one, silently truncating rather
+        # than erroring. 8192 is a conservative default most RFC 5424
+        # collectors accept; override it for a collector known to take more.
+        self.max_message_bytes = max_message_bytes
 
     def build(self, ctx: JobContext) -> dict[str, Any]:
         return {"message": self._format(ctx)}
@@ -104,14 +157,45 @@ class SyslogSink(SpoolingSink):
                 s.sendall(data + b"\n")
 
     def _format(self, ctx: JobContext) -> str:
-        # RFC 5424-ish. facility=1 (user-level), severity=6 (informational)
-        # -> pri = facility*8 + severity = 14.
-        highest = ctx.highest_severity.value if ctx.highest_severity else "NONE"
-        return (
-            f"<14>1 {ctx.received_at.isoformat()} dlpduck dlpduck - {ctx.job_id} "
-            f'[dlpduck disposition="{ctx.disposition}" severity="{highest}" '
-            f'hits="{len(ctx.hits)}"]'
-        )
+        # RFC 5424 header (facility=1 user-level, severity=6 informational
+        # -> pri=14) with no structured-data and the full payload as MSG —
+        # a collector that only wants the header still gets a real
+        # timestamp/MSGID to route on; one that parses MSG as JSON gets
+        # everything build()/WebhookSink also send.
+        header = f"<14>1 {ctx.received_at.isoformat()} dlpduck dlpduck - job.completed - "
+        payload = _job_payload(ctx)
+        message = header + json.dumps(payload, sort_keys=True)
+        if len(message.encode("utf-8")) <= self.max_message_bytes:
+            return message
+
+        # Too large, almost always because of a document with many hits.
+        # The full, untruncated event is still in the local audit log
+        # (the source of truth) and reaches WebhookSink, which has no
+        # datagram-size ceiling — drop the hit details here but keep the
+        # summary and the real count, so the document still shows up
+        # rather than disappearing (UDP) or the send failing outright.
+        payload = {**payload, "hits": [], "hits_truncated": True}
+        message = header + json.dumps(payload, sort_keys=True)
+        if len(message.encode("utf-8")) <= self.max_message_bytes:
+            return message
+
+        # Still too large — metadata or audit_fields, not hits. Fall back
+        # to the bare essentials rather than sending nothing at all. This
+        # is small and fixed-shape enough to fit any sane
+        # max_message_bytes; returned whole rather than byte-truncated,
+        # since cutting a JSON string mid-token would just trade one
+        # unparseable message for another.
+        minimal = {
+            "event": payload["event"],
+            "job_id": payload["job_id"],
+            "received_at": payload["received_at"],
+            "disposition": payload["disposition"],
+            "highest_severity": payload["highest_severity"],
+            "hit_count": payload["hit_count"],
+            "hits_truncated": True,
+            "metadata_truncated": True,
+        }
+        return header + json.dumps(minimal, sort_keys=True)
 
 
 _REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
@@ -156,17 +240,7 @@ class WebhookSink(SpoolingSink):
         self._opener = urllib.request.build_opener(_NoRedirects)
 
     def build(self, ctx: JobContext) -> dict[str, Any]:
-        return {
-            "job_id": ctx.job_id,
-            "received_at": ctx.received_at.isoformat(),
-            "disposition": ctx.disposition,
-            "highest_severity": ctx.highest_severity.value if ctx.highest_severity else None,
-            "hit_count": len(ctx.hits),
-            "hits": [
-                {"rule_id": h.rule_id, "severity": h.severity.value, "masked_text": h.masked_text}
-                for h in ctx.hits
-            ],
-        }
+        return _job_payload(ctx)
 
     def deliver(self, payload: dict[str, Any]) -> None:
         body = json.dumps(payload, sort_keys=True).encode("utf-8")
