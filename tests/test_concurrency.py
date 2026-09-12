@@ -217,6 +217,10 @@ class TestConcurrentIngestOfTheSameDocument:
         archived = list(config.destination.archive.glob("dt=*/*.pdf"))
         assert len(archived) == 1, [p.name for p in archived]
         assert len({r["job_id"] for r in latest_index_rows(pipeline.index_root)} ) == 1
+        # Whichever of the two lost the race waits for the winner's
+        # commit() rather than tripping over a half-written manifest —
+        # neither call should ever raise.
+        assert not errors, errors
 
 
 class TestACrashMidWriteCannotBreakTheWholeStore:
@@ -678,3 +682,65 @@ class TestCrashRecoveryCleansUpTheStaleFailureEntry:
         assert [r.job_id for r in resumed] == [job_id]
         assert not failed_root.exists()
         assert latest_index_rows(pipeline.index_root, job_ids=[job_id])[0]["disposition"] == "archive"
+
+
+class TestClaimRacingAnInFlightJob:
+    """claim() writes into the exact _processing/<job_id>/ directory a
+    job_lock holder (a sweep, a retry) is currently reading from or
+    committing — a fresh arrival of the identical content must detect
+    that and back off, not overwrite the in-flight job's manifest."""
+
+    def test_a_fresh_claim_of_identical_content_does_not_clobber_the_in_flight_job(
+        self, tmp_path, config, monkeypatch
+    ):
+        pipeline = Pipeline(config)
+        staging = config.destination.work_dir / "_processing"
+        source = _pdf(tmp_path / "orig.pdf", ["identical content for race repro"])
+        content = source.read_bytes()
+
+        entered_extract = threading.Event()
+        release_extract = threading.Event()
+        original_extract = pipeline.extractor.extract
+
+        def slow_extract(*args, **kwargs):
+            entered_extract.set()
+            release_extract.wait(timeout=5)
+            return original_extract(*args, **kwargs)
+
+        # Stage the original, then let a sweep pick it up and start
+        # (slow) extraction — mimics a job actively being processed.
+        ctx0 = pipeline.claim(source, None, staging)
+        job_id = ctx0.job_id
+
+        monkeypatch.setattr(pipeline.extractor, "extract", slow_extract)
+        sweep_result: dict = {}
+
+        def run_sweep():
+            sweep_result["resumed"] = pipeline.resume_staged(staging)
+
+        sweep_thread = threading.Thread(target=run_sweep)
+        sweep_thread.start()
+        assert entered_extract.wait(timeout=5), "sweep never started extracting"
+
+        # A fresh drop of byte-identical content, claimed independently
+        # while the sweep is still mid-process() for the same job_id.
+        identical_copy = tmp_path / "identical_copy.pdf"
+        identical_copy.write_bytes(content)
+        racing_ctx = pipeline.claim(identical_copy, None, staging)
+        assert racing_ctx.job_id == job_id
+        assert racing_ctx.reason == "duplicate_in_progress"
+
+        release_extract.set()
+        sweep_thread.join(timeout=5)
+
+        # The in-flight job finished under its ORIGINAL receipt, not a
+        # new one minted by the racing claim — no receipt is ever left
+        # stuck at "received".
+        receipts = pipeline.operations.receipts(job_id)
+        assert len(receipts) == 2  # original + the racing arrival's duplicate receipt
+        statuses = {r["status"] for r in receipts}
+        assert statuses == {"archive", "duplicate"}, receipts
+        assert latest_index_rows(pipeline.index_root, job_ids=[job_id])[0]["disposition"] == "archive"
+        # The racing claim's own source file was cleaned up, same as any
+        # other resolved duplicate arrival.
+        assert not identical_copy.exists()
