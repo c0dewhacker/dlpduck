@@ -239,6 +239,20 @@ class ClusterConfig(BaseModel):
     # parallel_extraction is true.
     sweep_interval_seconds: float = Field(default=5, gt=0)
 
+    @model_validator(mode="after")
+    def _renewal_has_real_margin(self) -> ClusterConfig:
+        # A renew that fires no sooner than the lease it's renewing always
+        # arrives after that lease has already expired — the leader loses
+        # and immediately re-takes it, forever, instead of holding it.
+        if self.renew_interval_seconds >= self.lease_duration_seconds:
+            raise ValueError(
+                f"cluster.renew_interval_seconds ({self.renew_interval_seconds}) must be less "
+                f"than cluster.lease_duration_seconds ({self.lease_duration_seconds}), with real "
+                "margin for a missed tick — otherwise the leader always renews too late and "
+                "leadership flaps continuously"
+            )
+        return self
+
 
 class RetentionConfig(BaseModel):
     # None means "keep forever" — retention is opt-in per store, not a

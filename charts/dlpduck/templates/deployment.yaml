@@ -1,3 +1,15 @@
+{{- $replicaCount := .Values.replicaCount | int }}
+{{- if gt $replicaCount 1 }}
+{{- range $store := list "drop" "archive" "quarantine" "work" "audit" }}
+{{- $settings := index $.Values.persistence $store }}
+{{- if not $settings.enabled }}
+{{- fail (printf "persistence.%s.enabled is false, but replicaCount is %d. An emptyDir is local to one pod — with more than one replica each would silently get its own disconnected state instead of sharing one, with no error to warn you. See DEPLOYMENT.md's \"More than one replica\" section." $store $replicaCount) }}
+{{- end }}
+{{- if not (has "ReadWriteMany" $settings.accessModes) }}
+{{- fail (printf "persistence.%s.accessModes is %v, but replicaCount is %d. Every store needs ReadWriteMany, on storage with real POSIX file locking, once more than one replica is running — see DEPLOYMENT.md's \"More than one replica\" section." $store $settings.accessModes $replicaCount) }}
+{{- end }}
+{{- end }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from dlpduck.config import (
+    ClusterConfig,
     Config,
     ConfigError,
     ConsoleConfig,
@@ -470,3 +471,19 @@ class TestConsoleBindParsing:
             )
             assert config_warnings(config) == [], bind
             assert config.console.host_port()[1] == 8080
+
+
+class TestClusterConfig:
+    def test_renew_interval_must_leave_margin_before_lease_expiry(self):
+        with pytest.raises(ValueError, match="renew_interval_seconds"):
+            ClusterConfig(lease_duration_seconds=15, renew_interval_seconds=15)
+
+    def test_renew_interval_past_lease_duration_is_also_refused(self):
+        with pytest.raises(ValueError, match="renew_interval_seconds"):
+            ClusterConfig(lease_duration_seconds=15, renew_interval_seconds=20)
+
+    def test_a_real_margin_is_accepted(self):
+        ClusterConfig(lease_duration_seconds=15, renew_interval_seconds=5)
+
+    def test_defaults_leave_a_margin(self):
+        ClusterConfig()

@@ -201,6 +201,14 @@ Every replica keeps serving the console regardless of which one holds the
 lease — only the drop-folder poll loop is gated. See `dlpduck.leader` and
 `Pipeline.job_lock` in the source for what actually guards what.
 
+With `parallel_extraction: true`, also raise `terminationGracePeriodSeconds`
+to at least `extraction.timeout_seconds + 30`. A pod can be mid-extraction
+when it's asked to stop; `dlpduck run` already waits out the real extraction
+ceiling before giving up on it, but Kubernetes SIGKILLs at the grace period
+regardless of what the process itself is doing, so a shorter grace period
+than that wait silently discards whatever a rolling update or routine
+restart interrupts.
+
 ### Ingress and TLS
 
 Enable ingress and secure cookies together:

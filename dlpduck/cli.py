@@ -646,7 +646,25 @@ def run(config_path: str) -> None:
     finally:
         stop_event.set()
         if sweep_thread is not None:
-            sweep_thread.join(timeout=config.cluster.sweep_interval_seconds * 2)
+            # A sweep can be legitimately mid-extraction when shutdown
+            # starts, and one extraction call is allowed to run for up to
+            # extraction.timeout_seconds — joining for only one sweep
+            # interval (as short as a few seconds) would abandon real,
+            # in-progress work on every restart that happens to land
+            # mid-job, silently discarding it (the daemon thread gets
+            # killed at interpreter exit either way). Wait out the real
+            # ceiling instead, plus headroom for the commit that follows
+            # extraction. terminationGracePeriodSeconds must be set at
+            # least this high too, or Kubernetes SIGKILLs before this
+            # wait can matter — see DEPLOYMENT.md.
+            join_timeout = config.extraction.timeout_seconds + 30
+            sweep_thread.join(timeout=join_timeout)
+            if sweep_thread.is_alive():
+                log.warning(
+                    "extraction sweep did not stop within %ss of shutdown — "
+                    "abandoning it; any job it was mid-extracting will resume from scratch",
+                    join_timeout,
+                )
         election.stop()
 
 
