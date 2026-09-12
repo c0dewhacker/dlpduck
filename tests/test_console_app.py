@@ -7,8 +7,10 @@ and the audit timeline is hidden from a role without audit.read.
 import json
 import re
 import shutil
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -286,6 +288,112 @@ class TestNeedsAttentionQueue:
         assert response.status_code == 303
         assert "unreadable scan.pdf" not in client.get("/failed").text
         assert "unreadable scan.pdf" in client.get("/failed?resolved=true").text
+
+
+class TestRetryDoesNotBlockTheRequest:
+    """A retry re-runs extraction — for a large document, real minutes.
+    The request that triggers it must come back immediately regardless,
+    not make the operator's own browser tab wait the whole thing out."""
+
+    def _failed_job(self, env, tmp_path, filename="scan.pdf"):
+        pipeline = env["pipeline"]
+        original_extract = pipeline.extractor.extract
+        pipeline.extractor.extract = Mock(side_effect=RuntimeError("temporary parser error"))
+        pdf = _pdf(tmp_path / filename, ["A document that will fail once, then succeed."])
+        ctx = pipeline.run_job(pdf, None, env["config"].destination.work_dir / "_processing")
+        pipeline.extractor.extract = original_extract
+        return ctx.job_id, original_extract
+
+    def test_single_retry_returns_before_extraction_finishes(self, env, tmp_path, monkeypatch):
+        job_id, original_extract = self._failed_job(env, tmp_path)
+        entered = threading.Event()
+        release = threading.Event()
+
+        def slow_extract(*args, **kwargs):
+            entered.set()
+            release.wait(timeout=5)
+            return original_extract(*args, **kwargs)
+
+        monkeypatch.setattr(env["pipeline"].extractor, "extract", slow_extract)
+
+        client = env["client"]
+        _login(client, "admin1")
+        page = client.get("/failed")
+        token = _csrf_token(page.text)
+
+        # If this were still synchronous, this call would hang here until
+        # release.set() below — nothing else in this test unblocks it. The
+        # response coming back at all, with extraction still parked on
+        # release.wait(), is the proof this no longer blocks the request.
+        resp = client.post(
+            f"/failed/failed/{job_id}/retry",
+            data={"reason": "transient parser error, retrying", "csrf_token": token},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+
+        flash_page = client.get("/failed")
+        assert "queued" in flash_page.text.lower()
+        assert entered.wait(timeout=5), "extraction never started at all"
+        assert (env["config"].destination.work_dir / "failed" / job_id).is_dir()  # not yet resolved
+
+        release.set()
+        client.app.state.background.shutdown(wait=True)
+
+        assert not (env["config"].destination.work_dir / "failed" / job_id).exists()
+        assert job_id[:12] in client.get("/jobs").text
+
+    def test_check_retryable_fails_fast_without_touching_the_background(self, env, tmp_path):
+        job_id, _ = self._failed_job(env, tmp_path)
+        client = env["client"]
+        _login(client, "admin1")
+        page = client.get("/failed")
+        token = _csrf_token(page.text)
+
+        resp = client.post(
+            f"/failed/failed/{job_id}/retry",
+            data={"reason": "   ", "csrf_token": token},  # blank after stripping
+            follow_redirects=False,
+        )
+
+        assert resp.status_code == 303
+        assert "reason is required" in client.get("/failed").text.lower()
+        # Never queued: the item is exactly as it was, no receipt minted.
+        assert (env["config"].destination.work_dir / "failed" / job_id).is_dir()
+
+    def test_bulk_retry_queues_without_waiting_for_any_of_them(self, env, tmp_path, monkeypatch):
+        job_ids = [self._failed_job(env, tmp_path, filename=f"scan{i}.pdf")[0] for i in range(3)]
+        original_extract = env["pipeline"].extractor.extract
+        release = threading.Event()
+
+        def slow_extract(*args, **kwargs):
+            release.wait(timeout=5)
+            return original_extract(*args, **kwargs)
+
+        monkeypatch.setattr(env["pipeline"].extractor, "extract", slow_extract)
+
+        client = env["client"]
+        _login(client, "admin1")
+        page = client.get("/failed")
+        token = _csrf_token(page.text)
+
+        resp = client.post(
+            "/failed/bulk-retry",
+            data={
+                "items": [f"failed:{jid}" for jid in job_ids],
+                "reason": "batch retry after parser fix",
+                "csrf_token": token,
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303  # returned without waiting on any of the three
+
+        release.set()
+        client.app.state.background.shutdown(wait=True)
+
+        jobs_text = client.get("/jobs").text
+        for jid in job_ids:
+            assert jid[:12] in jobs_text
 
 
 class TestJobsListPermissions:
@@ -855,7 +963,14 @@ class TestReprocessAction:
             data={"mode": "rules", "reprocess_action": "commit", "csrf_token": token},
         )
         assert resp.status_code == 200
-        assert "Committed" in resp.text
+        assert "queued" in resp.text.lower()
+
+        # The commit itself now runs in the background so the operator's
+        # own request isn't the one waiting on it — wait for it here, then
+        # check it really ran rather than anything this response shows.
+        client.app.state.background.shutdown(wait=True)
+        completed = [e for e in env["pipeline"].audit.events(limit=100) if e["event"] == "reprocess.completed"]
+        assert len(completed) == 1
 
     def test_preview_writes_no_new_assessment(self, env):
         client = env["client"]
@@ -1575,8 +1690,16 @@ class TestConcurrentReassessmentIsRefusedInTheConsole:
         )
 
         assert resp.status_code == 200  # not a 500
-        assert "reassessed by someone else" in resp.text
-        assert "Nothing was overwritten" in resp.text
+        assert "queued" in resp.text.lower()
+
+        # The commit (and so the race) now happens in the background —
+        # wait for it, then check the conflict was recorded rather than
+        # silently dropped. The job's own audit timeline is where an
+        # operator would actually see this on a later visit.
+        client.app.state.background.shutdown(wait=True)
+        events = env["pipeline"].audit.events_for_job(job_id)
+        [conflict] = [e for e in events if e["event"] == "reprocess.conflict"]
+        assert conflict["actor"] == "admin1"
 
     def test_a_preview_is_unaffected_by_the_guard(self, env):
         client = env["client"]

@@ -74,6 +74,27 @@ class FailureQueue:
         )
         logger.debug("failure queue: %s %s resolved by %s", kind, job_id, actor)
 
+    def check_retryable(self, kind, job_id, reason, confirm_delivery=False):
+        """Everything retry() would reject before it does any real work,
+        run with no side effects. The console calls this synchronously
+        before handing the actual retry to a background thread, so an
+        obviously-bad request (no reason, an unconfirmed uncertain
+        delivery) still fails immediately instead of silently failing a
+        few seconds later somewhere the operator isn't looking.
+        """
+        if not reason.strip():
+            raise ValueError("A reason is required")
+        folder = self.folder(kind, job_id)
+        pdf = folder / "document.pdf"
+        if pdf.is_symlink() or not pdf.is_file():
+            raise ValueError("This item is not a regular PDF; replace the source before retrying")
+        if kind == "staged":
+            manifest_path = folder / "manifest.json"
+            manifest = json.loads(manifest_path.read_text()) if manifest_path.is_file() else {"steps": []}
+            steps = manifest.get("steps", [])
+            if "emit_started" in steps and "emitted" not in steps and not confirm_delivery:
+                raise ValueError("Confirm possible duplicate delivery before retrying")
+
     def retry(self, kind, job_id, reason, actor, confirm_delivery=False):
         # Deliberately NOT @serialized: retrying re-runs extraction, the
         # slow part, so this job_id gets its own job_lock() instead of the
