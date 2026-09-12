@@ -460,16 +460,31 @@ class TestPdfAccess:
 
 class TestAuditDetailView:
     def test_search_event_detail_shows_query_range_and_severity(self, env):
+        from dlpduck.search import audit_terms
+
         client = env["client"]
         _login(client, "inv1")
         client.get("/search", params={"q": "4111", "severity": "HIGH", "start": "2020-01-01"})
+
+        # The exact digest this term hashes to, computed the same way the
+        # audit event itself does — a precise stand-in for "the raw term
+        # never appears in the audit trail". A blanket "4111 not anywhere
+        # on the page" check is flaky: the page also renders several
+        # genuinely random hex values per event (receipt_id, the chain's
+        # own hash/prev), any of which can coincidentally contain "4111"
+        # by pure chance and fail the test for a reason having nothing to
+        # do with the search term.
+        expected_hmac = audit_terms("4111", "hashed", env["config"].hmac_key())["terms_hmac"]
+
+        [search_event] = [e for e in env["pipeline"].audit.events(limit=100) if e["event"] == "ui.search"]
+        assert search_event["terms_hmac"] == expected_hmac
+        assert "query" not in search_event  # never the plaintext term, in the "hashed" default
 
         _login(client, "aud1")
         resp = client.get("/audit")
         assert resp.status_code == 200
         assert "ui.search" in resp.text
-        assert "4111" not in resp.text  # sensitive terms are hashed by default
-        assert "terms_hmac" in resp.text
+        assert expected_hmac in resp.text
         assert "HIGH" in resp.text
         assert "2020-01-01" in resp.text
 
