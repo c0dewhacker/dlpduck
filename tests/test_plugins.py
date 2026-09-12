@@ -239,6 +239,52 @@ class TestSyslogSink:
         with pytest.raises(ValueError):
             SyslogSink(host="127.0.0.1", protocol="carrier-pigeon")
 
+    def _hit(self, n: int):
+        from dlpduck.types import DLPHit, Severity
+
+        return DLPHit(
+            rule_id=f"rule.{n}", rule_name=f"Rule {n}", severity=Severity.HIGH, action="quarantine",
+            page_number=1, line_number=n, line_on_page=n, start=0, end=10,
+            masked_text=f"****-{n:06d}", match_hmac=f"hmac{n:028x}",
+        )
+
+    def test_a_document_with_many_hits_drops_hit_detail_but_keeps_the_count(self):
+        ctx = _ctx(hits=[self._hit(n) for n in range(500)])
+        sink = SyslogSink(host="127.0.0.1")
+
+        message = sink.build(ctx)["message"]
+
+        assert len(message.encode("utf-8")) <= sink.max_message_bytes
+        _, _, body = message.partition(" - job.completed - ")
+        payload = json.loads(body)  # still valid, parseable JSON
+        assert payload["hits"] == []
+        assert payload["hits_truncated"] is True
+        assert payload["hit_count"] == 500  # the real total survives the truncation
+
+    def test_a_small_document_is_never_truncated(self):
+        ctx = _ctx(hits=[self._hit(0)])
+        sink = SyslogSink(host="127.0.0.1")
+
+        message = sink.build(ctx)["message"]
+
+        _, _, body = message.partition(" - job.completed - ")
+        payload = json.loads(body)
+        assert "hits_truncated" not in payload
+        assert len(payload["hits"]) == 1
+
+    def test_oversized_metadata_falls_back_to_a_minimal_valid_message(self):
+        ctx = _ctx(hits=[self._hit(n) for n in range(500)], metadata={"note": "x" * 20000})
+        sink = SyslogSink(host="127.0.0.1")
+
+        message = sink.build(ctx)["message"]
+
+        _, _, body = message.partition(" - job.completed - ")
+        payload = json.loads(body)  # valid JSON even in the worst case
+        assert payload["job_id"] == ctx.job_id
+        assert payload["hits_truncated"] is True
+        assert payload["metadata_truncated"] is True
+        assert "metadata" not in payload
+
 
 class TestWebhookSink:
     def test_build_includes_document_metadata_and_extraction_stats(self):

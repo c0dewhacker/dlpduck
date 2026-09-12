@@ -116,13 +116,23 @@ def _job_payload(ctx: JobContext) -> dict[str, Any]:
 class SyslogSink(SpoolingSink):
     default_name = "syslog"
 
-    def __init__(self, host: str, port: int = 514, protocol: str = "udp", **kwargs):
+    def __init__(
+        self, host: str, port: int = 514, protocol: str = "udp", max_message_bytes: int = 8192, **kwargs
+    ):
         super().__init__(**kwargs)
         if protocol not in ("udp", "tcp"):
             raise ValueError(f"syslog protocol must be 'udp' or 'tcp', got {protocol!r}")
         self.host = host
         self.port = port
         self.protocol = protocol
+        # A document with many hits produces a hits[] array with no
+        # inherent size limit, unlike the old fixed-size line this
+        # replaced — and unlike WebhookSink's HTTP body, a UDP datagram
+        # has a hard ceiling (65507 bytes) and most real collectors
+        # enforce a far smaller practical one, silently truncating rather
+        # than erroring. 8192 is a conservative default most RFC 5424
+        # collectors accept; override it for a collector known to take more.
+        self.max_message_bytes = max_message_bytes
 
     def build(self, ctx: JobContext) -> dict[str, Any]:
         return {"message": self._format(ctx)}
@@ -152,8 +162,40 @@ class SyslogSink(SpoolingSink):
         # a collector that only wants the header still gets a real
         # timestamp/MSGID to route on; one that parses MSG as JSON gets
         # everything build()/WebhookSink also send.
-        payload = json.dumps(_job_payload(ctx), sort_keys=True)
-        return f"<14>1 {ctx.received_at.isoformat()} dlpduck dlpduck - job.completed - {payload}"
+        header = f"<14>1 {ctx.received_at.isoformat()} dlpduck dlpduck - job.completed - "
+        payload = _job_payload(ctx)
+        message = header + json.dumps(payload, sort_keys=True)
+        if len(message.encode("utf-8")) <= self.max_message_bytes:
+            return message
+
+        # Too large, almost always because of a document with many hits.
+        # The full, untruncated event is still in the local audit log
+        # (the source of truth) and reaches WebhookSink, which has no
+        # datagram-size ceiling — drop the hit details here but keep the
+        # summary and the real count, so the document still shows up
+        # rather than disappearing (UDP) or the send failing outright.
+        payload = {**payload, "hits": [], "hits_truncated": True}
+        message = header + json.dumps(payload, sort_keys=True)
+        if len(message.encode("utf-8")) <= self.max_message_bytes:
+            return message
+
+        # Still too large — metadata or audit_fields, not hits. Fall back
+        # to the bare essentials rather than sending nothing at all. This
+        # is small and fixed-shape enough to fit any sane
+        # max_message_bytes; returned whole rather than byte-truncated,
+        # since cutting a JSON string mid-token would just trade one
+        # unparseable message for another.
+        minimal = {
+            "event": payload["event"],
+            "job_id": payload["job_id"],
+            "received_at": payload["received_at"],
+            "disposition": payload["disposition"],
+            "highest_severity": payload["highest_severity"],
+            "hit_count": payload["hit_count"],
+            "hits_truncated": True,
+            "metadata_truncated": True,
+        }
+        return header + json.dumps(minimal, sort_keys=True)
 
 
 _REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
