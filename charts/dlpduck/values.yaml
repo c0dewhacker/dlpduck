@@ -2,6 +2,15 @@
 # filesystem state. The workload deliberately has one replica and uses a
 # Recreate strategy; do not run two watchers against one drop directory.
 
+# One replica is the safe default: two watchers must not independently
+# poll the same drop folder (see the chart README's "More than one
+# replica" section). Raise this only after setting
+# configuration.data.cluster.leader_election to "kubernetes" and moving
+# every persistence store to ReadWriteMany storage that supports real
+# POSIX file locking (NFSv4.1, CephFS — not GCS/S3-backed CSI drivers or
+# Azure Files/SMB).
+replicaCount: 1
+
 image:
   repository: c0dewhacker/dlpduck
   # An empty tag uses Chart.appVersion.

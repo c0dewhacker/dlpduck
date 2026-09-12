@@ -231,6 +231,8 @@ class TestDaemonLoopResilience:
     def test_one_failing_document_does_not_stop_the_loop(self, fast_watcher):
         import threading
 
+        # Default mode (claim_only=False): the watcher claims AND
+        # extracts inline, exactly as it always has.
         watcher, pipeline, config = fast_watcher
         _real_pdf(config.source.path / "poison.pdf", ["first"])
         _real_pdf(config.source.path / "good.pdf", ["second"])
@@ -265,6 +267,90 @@ class TestDaemonLoopResilience:
         watcher.run_forever(stop_event=stop)
 
         assert not list(config.destination.archive.glob("dt=*/*.pdf"))
+
+
+class TestLeaderGating:
+    """Claiming is the one thing that isn't safe from more than one
+    watcher at once (see dlpduck.leader) — a standby replica must never
+    call stage(), even when files are sitting there ready."""
+
+    def test_a_standby_watcher_never_stages_anything(self, fast_watcher):
+        import threading
+
+        watcher, _pipeline, config = fast_watcher
+        watcher._is_leader = lambda: False
+        _real_pdf(config.source.path / "doc.pdf", ["content"])
+
+        stop = threading.Event()
+        threading.Timer(0.05, stop.set).start()
+        watcher.run_forever(stop_event=stop)
+
+        assert not list((config.destination.work_dir / "_processing").glob("*/document.pdf"))
+
+    def test_becoming_leader_mid_run_starts_staging(self, fast_watcher):
+        import threading
+
+        watcher, _pipeline, config = fast_watcher
+        watcher._claim_only = True  # otherwise a committed job leaves _processing/ entirely
+        is_leader = {"value": False}
+        watcher._is_leader = lambda: is_leader["value"]
+        _real_pdf(config.source.path / "doc.pdf", ["content"])
+
+        stop = threading.Event()
+
+        def _flip_then_stop():
+            is_leader["value"] = True
+            threading.Timer(0.1, stop.set).start()
+
+        threading.Timer(0.05, _flip_then_stop).start()
+        watcher.run_forever(stop_event=stop)
+
+        assert list((config.destination.work_dir / "_processing").glob("*/document.pdf"))
+
+
+class TestClaimOnlyMode:
+    """cluster.parallel_extraction opts into this: the watcher claims but
+    never extracts, leaving that to a sweep run elsewhere (cli.py)."""
+
+    def test_ready_files_are_staged_but_never_processed(self, fast_watcher):
+        watcher, pipeline, config = fast_watcher
+        watcher._claim_only = True
+        _real_pdf(config.source.path / "doc.pdf", ["content"])
+
+        import threading
+        stop = threading.Event()
+        threading.Timer(0.1, stop.set).start()
+        watcher.run_forever(stop_event=stop)
+
+        staged = list((config.destination.work_dir / "_processing").glob("*/document.pdf"))
+        assert staged
+        assert not list(config.destination.archive.glob("dt=*/*.pdf"))
+
+    def test_one_failing_claim_does_not_stop_the_loop(self, fast_watcher):
+        import threading
+
+        watcher, pipeline, config = fast_watcher
+        watcher._claim_only = True
+        _real_pdf(config.source.path / "poison.pdf", ["first"])
+        _real_pdf(config.source.path / "good.pdf", ["second"])
+
+        seen: list[Path] = []
+        stop = threading.Event()
+        real_stage = pipeline.stage
+
+        def _explode_on_first(pdf_path, meta_path, staging_root):
+            seen.append(pdf_path)
+            if pdf_path.name == "poison.pdf":
+                raise RuntimeError("something went badly wrong for this one document")
+            result = real_stage(pdf_path, meta_path, staging_root)
+            stop.set()
+            return result
+
+        pipeline.stage = _explode_on_first
+        watcher.run_forever(stop_event=stop)
+
+        assert {p.name for p in seen} == {"poison.pdf", "good.pdf"}
+        assert list((config.destination.work_dir / "_processing").glob("*/document.pdf"))
 
 
 class TestVanishingFiles:

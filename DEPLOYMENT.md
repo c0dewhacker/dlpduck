@@ -156,6 +156,59 @@ and `existingClaim`. Disabling a claim uses ephemeral `emptyDir` storage and is
 appropriate only for temporary evaluation. Generated claims use Helm's `keep`
 policy by default, so uninstalling a release leaves its data intact.
 
+### More than one replica
+
+The default — `replicaCount: 1`, strategy `Recreate` — is right for initial
+evaluation and for most real deployments; a standalone Docker container and a
+plain `dlpduck run` see none of what follows and behave exactly as before.
+Raise `replicaCount` only for horizontal scaling or high availability, and
+only after both of these are true:
+
+1. **Every `persistence` claim is `ReadWriteMany`, on storage with real POSIX
+   file locking** — NFSv4.1 (AWS EFS and GCP Filestore both support this) or
+   CephFS. The locking that keeps concurrent writers safe is plain `flock`
+   and atomic hardlink-create; a GCS/S3-backed CSI driver or Azure Files
+   (SMB) does not implement these reliably and will silently corrupt
+   concurrent writes rather than error.
+2. **`configuration.data.cluster.leader_election` is set to `"kubernetes"`.**
+   Extraction and every console action (retry, purge, resolve, reprocess)
+   are already safe under concurrent multi-pod access; the drop-folder watch
+   loop is not, and needs exactly one replica running it at a time. Setting
+   this switches the deployment strategy to `RollingUpdate` automatically,
+   mounts the pod's service account token, and grants it `get`/`create`/
+   `update` on one named `Lease` — nothing broader.
+
+```yaml
+replicaCount: 3
+configuration:
+  data:
+    cluster:
+      leader_election: kubernetes
+      # Splits claiming a file (still single-replica, via the lease above)
+      # from extracting it, so OCR work is spread across all replicas
+      # instead of only ever running on the leader.
+      parallel_extraction: true
+
+persistence:
+  drop: {accessModes: [ReadWriteMany]}
+  archive: {accessModes: [ReadWriteMany]}
+  quarantine: {accessModes: [ReadWriteMany]}
+  work: {accessModes: [ReadWriteMany]}
+  audit: {accessModes: [ReadWriteMany]}
+```
+
+Every replica keeps serving the console regardless of which one holds the
+lease — only the drop-folder poll loop is gated. See `dlpduck.leader` and
+`Pipeline.job_lock` in the source for what actually guards what.
+
+With `parallel_extraction: true`, also raise `terminationGracePeriodSeconds`
+to at least `extraction.timeout_seconds + 30`. A pod can be mid-extraction
+when it's asked to stop; `dlpduck run` already waits out the real extraction
+ceiling before giving up on it, but Kubernetes SIGKILLs at the grace period
+regardless of what the process itself is doing, so a shorter grace period
+than that wait silently discards whatever a rolling update or routine
+restart interrupts.
+
 ### Ingress and TLS
 
 Enable ingress and secure cookies together:

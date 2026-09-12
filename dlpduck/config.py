@@ -208,6 +208,52 @@ class ConsoleConfig(BaseModel):
         return raw
 
 
+class ClusterConfig(BaseModel):
+    """More than one replica needs exactly one of them polling the drop
+    folder at a time — Watcher's own size-stability/metadata-grace
+    tracking is in-memory per-process state, so two independent watchers
+    would diverge on it. Extraction and every console action are already
+    safe under concurrent, multi-pod access (they go through a real
+    cross-process file lock), so this only ever gates the watch loop.
+
+    "none" (the default) makes every replica act as leader immediately,
+    with no coordination at all — a standalone/single-pod deployment
+    behaves exactly as before this existed.
+    """
+    leader_election: Literal["none", "kubernetes"] = "none"
+    lease_name: str = "dlpduck-watcher"
+    lease_namespace: str | None = None  # None: read from the in-cluster service account
+    identity: str | None = None  # None: $POD_NAME, then $HOSTNAME
+    lease_duration_seconds: float = Field(default=15, gt=0)
+    renew_interval_seconds: float = Field(default=5, gt=0)
+    # False (the default): the watcher claims AND extracts a file inline,
+    # exactly as it always has — a standalone/Docker/CLI deployment sees
+    # no behavior change at all. True splits claiming (the watcher) from
+    # extraction (a continuously-run sweep — see sweep_interval_seconds),
+    # so extraction can be picked up by any replica through the same
+    # per-job file lock the crash-recovery sweep already uses. Only worth
+    # setting once there's more than one replica actually running.
+    parallel_extraction: bool = False
+    # How often every replica — leader or not — checks _processing/ for
+    # staged work nobody else has claimed yet. Only read when
+    # parallel_extraction is true.
+    sweep_interval_seconds: float = Field(default=5, gt=0)
+
+    @model_validator(mode="after")
+    def _renewal_has_real_margin(self) -> ClusterConfig:
+        # A renew that fires no sooner than the lease it's renewing always
+        # arrives after that lease has already expired — the leader loses
+        # and immediately re-takes it, forever, instead of holding it.
+        if self.renew_interval_seconds >= self.lease_duration_seconds:
+            raise ValueError(
+                f"cluster.renew_interval_seconds ({self.renew_interval_seconds}) must be less "
+                f"than cluster.lease_duration_seconds ({self.lease_duration_seconds}), with real "
+                "margin for a missed tick — otherwise the leader always renews too late and "
+                "leadership flaps continuously"
+            )
+        return self
+
+
 class RetentionConfig(BaseModel):
     # None means "keep forever" — retention is opt-in per store, not a
     # surprise default that starts silently deleting data.
@@ -241,6 +287,7 @@ class Config(BaseModel):
     dlp: DlpConfig = Field(default_factory=DlpConfig)
     destination: DestinationConfig
     audit: AuditConfig = Field(default_factory=AuditConfig)
+    cluster: ClusterConfig = Field(default_factory=ClusterConfig)
     retention: RetentionConfig = Field(default_factory=RetentionConfig)
     console: ConsoleConfig = Field(default_factory=ConsoleConfig)
     plugins: list[dict] = Field(default_factory=list)  # enrich and emit phases
