@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -113,11 +115,41 @@ def _json_or_empty(raw: Any) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _run_in_background(app: FastAPI, description: str, func, *args, **kwargs) -> None:
+    """Fire-and-forget a slow pipeline call from a request handler that
+    has already done its own fast, synchronous validation. A plain
+    ThreadPoolExecutor swallows an exception from a submitted callable
+    unless something calls .result() on the returned Future — which
+    would defeat the point here — so this wraps it in a try/except that
+    at least logs a failure that would otherwise vanish silently.
+    """
+
+    def _wrapped() -> None:
+        try:
+            func(*args, **kwargs)
+        except Exception:
+            logger.exception("background %s failed", description)
+
+    app.state.background.submit(_wrapped)
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    yield
+    # wait=False: shutdown itself should be quick, not gated on whatever
+    # retry/reprocess happens to be mid-extraction. Nothing is corrupted
+    # either way — an abandoned job is just wherever it was (staged or
+    # failed) for an operator to retry again, the same as any other
+    # interrupted job this system already knows how to recover.
+    app.state.background.shutdown(wait=False)
+
+
 def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
-    app = FastAPI(title="DLPDuck Console")
+    app = FastAPI(title="DLPDuck Console", lifespan=_lifespan)
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
     app.state.config = config
     app.state.pipeline = pipeline
+    app.state.background = ThreadPoolExecutor(max_workers=4, thread_name_prefix="console-async")
     app.state.operations = pipeline.operations
     app.state.user_store = LocalUserStore(
         [u.model_dump() for u in config.console.auth.users]
@@ -421,8 +453,21 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
         verify_csrf(request, csrf_token)
         try:
             if action == "retry":
-                failures.retry(kind, job_id, reason, user.username, confirm_delivery)
-                message = "Retry completed. Review the resulting job in Jobs."
+                # A retry re-runs extraction — the slow part — so this
+                # returns as soon as the request itself is known to be
+                # valid, rather than making the operator's browser tab
+                # wait out the whole thing. check_retryable() is the same
+                # fast-fail validation retry() does first, run here with
+                # no side effects so an obviously bad request (no reason,
+                # an unconfirmed uncertain delivery) still fails
+                # immediately instead of silently failing in the
+                # background where nobody is looking.
+                failures.check_retryable(kind, job_id, reason, confirm_delivery)
+                _run_in_background(
+                    app, f"retry {kind}/{job_id}",
+                    failures.retry, kind, job_id, reason, user.username, confirm_delivery,
+                )
+                message = "Retry queued — refresh Jobs or Needs Attention in a moment to see the result."
             elif action == "resolve":
                 failures.resolve(kind, job_id, reason, user.username)
                 message = "Marked resolved. The file is retained in the resolved queue."
@@ -447,7 +492,14 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
             request.session["queue_flash"] = "Select at least one item to retry."
             return RedirectResponse("/failed", status_code=303)
 
-        succeeded: list[str] = []
+        # Each retry re-runs extraction, so this only does the fast,
+        # synchronous check_retryable() per item here — an item that
+        # fails that comes back immediately as "not queued" — and hands
+        # the actual retry to the background, the same as a single-item
+        # retry. Waiting for a whole batch of large documents to finish
+        # extracting, one after another, before the page could respond
+        # at all was exactly the problem this exists to avoid.
+        queued: list[str] = []
         failed: list[tuple[str, str]] = []
         for entry in items:
             kind, _, job_id = entry.partition(":")
@@ -455,14 +507,19 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
                 failed.append((entry, "malformed selection"))
                 continue
             try:
-                failures.retry(kind, job_id, reason, user.username, confirm_delivery)
-                succeeded.append(job_id)
+                failures.check_retryable(kind, job_id, reason, confirm_delivery)
             except ValueError as exc:
                 failed.append((job_id, str(exc)))
+                continue
+            _run_in_background(
+                app, f"retry {kind}/{job_id}",
+                failures.retry, kind, job_id, reason, user.username, confirm_delivery,
+            )
+            queued.append(job_id)
 
-        message = f"Retried {len(succeeded)} of {len(items)} selected item(s)."
+        message = f"Queued {len(queued)} of {len(items)} selected item(s) — check Jobs and Needs Attention shortly for results."
         if failed:
-            message += " Not retried: " + "; ".join(f"{jid[:12]} ({err})" for jid, err in failed)
+            message += " Not queued: " + "; ".join(f"{jid[:12]} ({err})" for jid, err in failed)
         request.session["queue_flash"] = message
         return RedirectResponse("/failed", status_code=303)
 
@@ -862,24 +919,33 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
                 detail=f"This page needs the '{permission}' permission, which your role doesn't grant.",
             )
         _get_job_or_404(job_id)
-        runner = reprocessor.commit if reprocess_action == "commit" else reprocessor.preview
-        try:
-            summary = runner(job_ids=[job_id], mode=checked_mode)
-        except AssessmentExists:
-            # Something else recorded this assessment first — another
-            # operator, or the CLI. Refusing beats silently overwriting
-            # their assessment; the page reloads showing the state that
-            # actually won, and the operator can decide again from there.
+        if reprocess_action == "commit":
+            # extract mode re-runs OCR — the slow part — so, like retry(),
+            # this hands the actual work to a background thread rather
+            # than making the operator's browser tab wait out the whole
+            # thing. AssessmentExists (another operator or the CLI won the
+            # write) can only be known once the real commit runs, so this
+            # response can no longer show it inline — recorded as an
+            # audit event instead, which the job's own timeline already
+            # surfaces on the next visit.
+            def _commit() -> None:
+                try:
+                    reprocessor.commit(job_ids=[job_id], mode=checked_mode)
+                except AssessmentExists:
+                    pipeline.audit.append(
+                        "reprocess.conflict",
+                        job_id=job_id,
+                        mode=mode,
+                        actor=user.username,
+                        detail="another writer recorded an assessment first; this commit was not applied",
+                    )
+
+            _run_in_background(app, f"reprocess {job_id}", _commit)
             return _render_job_detail(
-                request,
-                job_id,
-                user,
-                flash=(
-                    "This job was reassessed by someone else while you were looking at it. "
-                    "Nothing was overwritten — review the current assessment and retry if "
-                    "you still want to."
-                ),
+                request, job_id, user,
+                flash="Reassessment queued — refresh in a moment to see the result.",
             )
+        summary = reprocessor.preview(job_ids=[job_id], mode=checked_mode)
         outcome = summary.outcomes[0] if summary.outcomes else None
         return _render_job_detail(
             request,
