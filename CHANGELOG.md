@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.1.8](https://github.com/c0dewhacker/dlpduck/compare/v0.1.7...v0.1.8) (2026-09-12)
+
+
+### Features
+
+* **chart:** support more than one replica ([e3b6154](https://github.com/c0dewhacker/dlpduck/commit/e3b6154a5bb56ba0085b00d04929c899d14c07e2))
+* HA leader election, parallel extraction, and drop SQLite ([24d1a2b](https://github.com/c0dewhacker/dlpduck/commit/24d1a2b9de3422aed9ac528e2375e681d2f85782))
+* HA leader election, parallel extraction, and drop SQLite ([5d1a038](https://github.com/c0dewhacker/dlpduck/commit/5d1a0383d133b087af99d34ebe6f8e462161ff48))
+* Kubernetes Lease-based leader election for the watch loop ([06ceb48](https://github.com/c0dewhacker/dlpduck/commit/06ceb48bc85892bd068f47b417b9200b4486507a))
+* send the full job outcome to syslog and webhook ([f48d8ea](https://github.com/c0dewhacker/dlpduck/commit/f48d8ea6d5017316e8e6a29f19c905612872dfd0))
+* send the full job outcome to syslog and webhook, not a subset ([8f813b7](https://github.com/c0dewhacker/dlpduck/commit/8f813b73387269bb82de8404fa43fa21704fb105))
+* split claim from extraction so it can be spread across replicas ([15d534d](https://github.com/c0dewhacker/dlpduck/commit/15d534de27dea650f00dfd8fc4577c022092fc1f))
+
+
+### Bug Fixes
+
+* bound the syslog payload so it can't exceed a UDP datagram ([f9389fd](https://github.com/c0dewhacker/dlpduck/commit/f9389fdb23c5e2497b75d81b0c24a4c34294f612))
+* claim() can clobber a job another actor is actively processing ([da29c9c](https://github.com/c0dewhacker/dlpduck/commit/da29c9c8a72daddc818fe452c38d867e9b7f0df7))
+* stop staged-job recovery from blocking console readiness ([50a3820](https://github.com/c0dewhacker/dlpduck/commit/50a3820f61dbd2a6a4e42e93ba03de3795866f85))
+* stop staged-job recovery from blocking console readiness ([9ee9d16](https://github.com/c0dewhacker/dlpduck/commit/9ee9d160f8c5c6f0a2950e9c70589dab7349a2d7))
+* three more bugs found in review ([245a4ad](https://github.com/c0dewhacker/dlpduck/commit/245a4adaee52523cc91abe7a28a60bac4ac0afbb))
+
 ## [0.1.7](https://github.com/c0dewhacker/dlpduck/compare/v0.1.6...v0.1.7) (2026-09-11)
 
 
