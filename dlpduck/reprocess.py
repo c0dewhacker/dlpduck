@@ -389,7 +389,6 @@ class Reprocessor:
             summary.outcomes.append(outcome)
         return summary
 
-    @serialized
     def commit(
         self,
         job_ids: list[str] | None = None,
@@ -402,6 +401,13 @@ class Reprocessor:
         de-escalations are recorded with release_pending=True and leave
         the PDF exactly where it is. In "extract" mode, a changed job's
         content-store entry is also refreshed with the newly extracted text.
+
+        Deliberately NOT @serialized: "extract" mode re-runs OCR per job,
+        and the global lock would otherwise block unrelated work for the
+        whole batch. Each write still goes through _write_assessment(),
+        which is @serialized and has its own assessment_seq optimistic
+        check, so concurrent reassessments of the same job can't clobber
+        each other.
         """
         self._recover_transitions()
         rows = self._scope_rows(job_ids, start, end)

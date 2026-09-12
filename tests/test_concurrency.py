@@ -13,6 +13,7 @@ import shutil
 import threading
 from datetime import date
 from pathlib import Path
+from unittest.mock import Mock
 
 import duckdb
 import pyarrow as pa
@@ -21,6 +22,7 @@ import pytest
 
 from dlpduck.audit import AuditLog
 from dlpduck.config import Config
+from dlpduck.failures import FailureQueue
 from dlpduck.index import (
     AssessmentExists,
     compact_partition,
@@ -215,6 +217,10 @@ class TestConcurrentIngestOfTheSameDocument:
         archived = list(config.destination.archive.glob("dt=*/*.pdf"))
         assert len(archived) == 1, [p.name for p in archived]
         assert len({r["job_id"] for r in latest_index_rows(pipeline.index_root)} ) == 1
+        # Whichever of the two lost the race waits for the winner's
+        # commit() rather than tripping over a half-written manifest —
+        # neither call should ever raise.
+        assert not errors, errors
 
 
 class TestACrashMidWriteCannotBreakTheWholeStore:
@@ -505,3 +511,236 @@ class TestCompactionKeepsTheGuarantees:
         write_row(pipeline.index_root, dict(row), **kwargs)
         with pytest.raises(AssessmentExists):
             write_row(pipeline.index_root, dict(row), **kwargs)
+
+
+class TestSlowJobDoesNotBlockUnrelatedWork:
+    """run_job()/resume_staged()/retry() no longer hold the global lock for
+    extraction — the whole point of narrowing it. A job stuck mid-extraction
+    must not stall an unrelated purge, retry, or resolve."""
+
+    def test_purge_of_a_different_job_completes_while_another_is_still_extracting(
+        self, tmp_path, config, monkeypatch
+    ):
+        pipeline = Pipeline(config)
+        staging = config.destination.work_dir / "_processing"
+
+        other = pipeline.run_job(
+            _pdf(tmp_path / "other.pdf", ["unrelated content"]), None, staging
+        )
+
+        extracting = threading.Event()
+        release = threading.Event()
+        original_extract = pipeline.extractor.extract
+
+        def slow_extract(*args, **kwargs):
+            extracting.set()
+            release.wait(timeout=5)
+            return original_extract(*args, **kwargs)
+
+        monkeypatch.setattr(pipeline.extractor, "extract", slow_extract)
+        slow_path = _pdf(tmp_path / "slow.pdf", ["slow content"])
+        errors: list[Exception] = []
+
+        def run_slow() -> None:
+            try:
+                pipeline.run_job(slow_path, None, staging)
+            except Exception as exc:
+                errors.append(exc)
+
+        worker = threading.Thread(target=run_slow)
+        worker.start()
+        assert extracting.wait(timeout=5), "slow job never started extracting"
+
+        # The slow job is stuck mid-extraction, still holding no global
+        # lock — this must return immediately rather than wait for it.
+        result = pipeline.purge_content(other.job_id, "unrelated cleanup", "admin")
+        assert result.content_removed
+
+        release.set()
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+        assert not errors
+
+    def test_retry_of_a_different_job_completes_while_another_is_still_extracting(
+        self, tmp_path, config, monkeypatch
+    ):
+        pipeline = Pipeline(config)
+        staging = config.destination.work_dir / "_processing"
+        queue = FailureQueue(pipeline)
+        original_extract = pipeline.extractor.extract
+
+        # A second, unrelated job already sitting in the failure queue.
+        monkeypatch.setattr(pipeline.extractor, "extract", Mock(side_effect=RuntimeError("boom")))
+        stuck = pipeline.run_job(_pdf(tmp_path / "stuck.pdf", ["stuck content"]), None, staging)
+
+        extracting = threading.Event()
+        release = threading.Event()
+
+        def slow_extract(*args, **kwargs):
+            extracting.set()
+            release.wait(timeout=5)
+            return original_extract(*args, **kwargs)
+
+        monkeypatch.setattr(pipeline.extractor, "extract", slow_extract)
+        slow_path = _pdf(tmp_path / "slow.pdf", ["slow content"])
+        errors: list[Exception] = []
+
+        def run_slow() -> None:
+            try:
+                pipeline.run_job(slow_path, None, staging)
+            except Exception as exc:
+                errors.append(exc)
+
+        worker = threading.Thread(target=run_slow)
+        worker.start()
+        assert extracting.wait(timeout=5), "slow job never started extracting"
+
+        # The slow job is stuck inside its own extract() call, blocked on
+        # `release` — restoring the real extractor here only affects *new*
+        # calls, so retry()'s own re-extraction runs fast and unblocked
+        # while the slow job is still waiting.
+        monkeypatch.setattr(pipeline.extractor, "extract", original_extract)
+        queue.retry("failed", stuck.job_id, "recovered", "admin")
+        assert latest_index_rows(pipeline.index_root, job_ids=[stuck.job_id])[0]["disposition"] == "archive"
+
+        release.set()
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+        assert not errors
+
+
+class TestJobLockPreventsSameJobRaces:
+    """job_lock() is what replaced @serialized's protection against two
+    attempts to retry or recover the *same* job_id at once."""
+
+    def test_two_concurrent_retries_of_the_same_job_do_not_both_proceed(
+        self, tmp_path, config, monkeypatch
+    ):
+        pipeline = Pipeline(config)
+        staging = config.destination.work_dir / "_processing"
+        queue = FailureQueue(pipeline)
+        original_extract = pipeline.extractor.extract
+
+        monkeypatch.setattr(pipeline.extractor, "extract", Mock(side_effect=RuntimeError("boom")))
+        ctx = pipeline.run_job(_pdf(tmp_path / "doc.pdf", ["content"]), None, staging)
+
+        entered = threading.Event()
+        release = threading.Event()
+
+        def slow_extract(*args, **kwargs):
+            entered.set()
+            release.wait(timeout=5)
+            return original_extract(*args, **kwargs)
+
+        monkeypatch.setattr(pipeline.extractor, "extract", slow_extract)
+        results: list[tuple[str, Exception | None]] = []
+
+        def first_retry() -> None:
+            try:
+                queue.retry("failed", ctx.job_id, "attempt one", "admin")
+                results.append(("first", None))
+            except Exception as exc:
+                results.append(("first", exc))
+
+        worker = threading.Thread(target=first_retry)
+        worker.start()
+        assert entered.wait(timeout=5), "first retry never started extracting"
+
+        with pytest.raises(ValueError, match="already being retried"):
+            queue.retry("failed", ctx.job_id, "attempt two", "admin")
+
+        release.set()
+        worker.join(timeout=5)
+        assert results == [("first", None)]
+
+
+class TestCrashRecoveryCleansUpTheStaleFailureEntry:
+    """A retry that dies before its own cleanup leaves the original
+    failed/<job_id> folder behind. resume_staged() must not leave that
+    folder advertising a failure the recovered job already superseded."""
+
+    def test_a_successful_recovery_removes_the_stale_failed_folder(self, tmp_path, config):
+        pipeline = Pipeline(config)
+        staging = config.destination.work_dir / "_processing"
+
+        ctx = pipeline.claim(
+            _pdf(tmp_path / "doc.pdf", ["ordinary content"]), None, staging
+        )
+        job_id = ctx.job_id
+
+        # Simulate retry()'s state right before the process died: the
+        # original failed/<job_id> folder from the first attempt is still
+        # there (its own rmtree() never ran), while the job itself is
+        # freshly staged in _processing/ ready to be recovered.
+        failed_root = pipeline.config.destination.work_dir / "failed" / job_id
+        failed_root.mkdir(parents=True)
+        (failed_root / "document.pdf").write_bytes(b"%PDF-1.4\nstale copy")
+        (failed_root / "metadata.json").write_text(f'{{"job_id": "{job_id}", "reason": "old failure"}}')
+
+        resumed = pipeline.resume_staged(staging)
+
+        assert [r.job_id for r in resumed] == [job_id]
+        assert not failed_root.exists()
+        assert latest_index_rows(pipeline.index_root, job_ids=[job_id])[0]["disposition"] == "archive"
+
+
+class TestClaimRacingAnInFlightJob:
+    """claim() writes into the exact _processing/<job_id>/ directory a
+    job_lock holder (a sweep, a retry) is currently reading from or
+    committing — a fresh arrival of the identical content must detect
+    that and back off, not overwrite the in-flight job's manifest."""
+
+    def test_a_fresh_claim_of_identical_content_does_not_clobber_the_in_flight_job(
+        self, tmp_path, config, monkeypatch
+    ):
+        pipeline = Pipeline(config)
+        staging = config.destination.work_dir / "_processing"
+        source = _pdf(tmp_path / "orig.pdf", ["identical content for race repro"])
+        content = source.read_bytes()
+
+        entered_extract = threading.Event()
+        release_extract = threading.Event()
+        original_extract = pipeline.extractor.extract
+
+        def slow_extract(*args, **kwargs):
+            entered_extract.set()
+            release_extract.wait(timeout=5)
+            return original_extract(*args, **kwargs)
+
+        # Stage the original, then let a sweep pick it up and start
+        # (slow) extraction — mimics a job actively being processed.
+        ctx0 = pipeline.claim(source, None, staging)
+        job_id = ctx0.job_id
+
+        monkeypatch.setattr(pipeline.extractor, "extract", slow_extract)
+        sweep_result: dict = {}
+
+        def run_sweep():
+            sweep_result["resumed"] = pipeline.resume_staged(staging)
+
+        sweep_thread = threading.Thread(target=run_sweep)
+        sweep_thread.start()
+        assert entered_extract.wait(timeout=5), "sweep never started extracting"
+
+        # A fresh drop of byte-identical content, claimed independently
+        # while the sweep is still mid-process() for the same job_id.
+        identical_copy = tmp_path / "identical_copy.pdf"
+        identical_copy.write_bytes(content)
+        racing_ctx = pipeline.claim(identical_copy, None, staging)
+        assert racing_ctx.job_id == job_id
+        assert racing_ctx.reason == "duplicate_in_progress"
+
+        release_extract.set()
+        sweep_thread.join(timeout=5)
+
+        # The in-flight job finished under its ORIGINAL receipt, not a
+        # new one minted by the racing claim — no receipt is ever left
+        # stuck at "received".
+        receipts = pipeline.operations.receipts(job_id)
+        assert len(receipts) == 2  # original + the racing arrival's duplicate receipt
+        statuses = {r["status"] for r in receipts}
+        assert statuses == {"archive", "duplicate"}, receipts
+        assert latest_index_rows(pipeline.index_root, job_ids=[job_id])[0]["disposition"] == "archive"
+        # The racing claim's own source file was cleaned up, same as any
+        # other resolved duplicate arrival.
+        assert not identical_copy.exists()
