@@ -66,6 +66,27 @@ audit:
   integrity: chained               # chained | none
   path: /data/audit                 # optional; defaults to work_dir/audit
 
+# More than one replica needs exactly one of them polling the drop folder
+# at a time; extraction and every console action are already safe under
+# concurrent multi-pod access and never need this. "none" (the default,
+# shown here) makes every replica act as leader immediately — a
+# standalone/single-pod deployment behaves exactly as if this whole
+# section were absent.
+cluster:
+  leader_election: none            # none | kubernetes
+  lease_name: dlpduck-watcher
+  lease_namespace: null            # null: read from the in-cluster service account
+  identity: null                   # null: $POD_NAME, then $HOSTNAME
+  lease_duration_seconds: 15
+  renew_interval_seconds: 5
+  # false (the default, shown here): claim and extract inline, exactly
+  # as always. true splits them, so extraction can be picked up by any
+  # replica — only worth setting once more than one is actually running.
+  parallel_extraction: false
+  # How often every replica — leader or not — checks for staged work
+  # nobody else has claimed yet. Only read when parallel_extraction is true.
+  sweep_interval_seconds: 5
+
 retention:
   # None (the default, shown here) means "keep forever" — retention is
   # opt-in per store, never a surprise default that starts deleting data.

@@ -92,11 +92,12 @@ Generated claims carry Helm's `keep` policy by default, so uninstalling the
 release does not delete document or audit data. Set `persistence.retain: false`
 only when lifecycle management outside the release guarantees the data is safe.
 
-DLPDuck intentionally runs one replica with a `Recreate` update strategy. Two
-watchers must not consume the same drop folder concurrently.
+DLPDuck runs one replica with a `Recreate` update strategy by default. Two
+watchers must not independently poll the same drop folder — see "More than
+one replica" below before raising `replicaCount`.
 
 See the repository [deployment guide](../../DEPLOYMENT.md) for ingress, TLS,
-storage and upgrade examples.
+storage, scaling and upgrade examples.
 
 The ingress integration supports cert-manager through either a cluster-wide
 `ClusterIssuer` or a namespaced `Issuer`. When TLS is enabled, also set

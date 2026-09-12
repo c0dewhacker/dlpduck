@@ -186,8 +186,8 @@ class Pipeline:
         self.operations.receipt(
             receipt_id, job_id, received_at.isoformat(), pdf_path.name, self.config.source.name
         )
-        self.operations.receipt_metadata(receipt_id, receipt_metadata)
-        self.operations.finish_receipt(receipt_id, "duplicate")
+        self.operations.receipt_metadata(job_id, receipt_id, receipt_metadata)
+        self.operations.finish_receipt(job_id, receipt_id, "duplicate")
         self.audit.append(event, job_id=job_id, receipt_id=receipt_id, source_name=pdf_path.name)
         _unlink_if_same(pdf_path, opened_pdf)
         if metadata_path is not None:
@@ -350,7 +350,7 @@ class Pipeline:
                     )
 
         metadata = allowlist(raw_metadata, self.config.source.metadata_fields)
-        self.operations.receipt_metadata(receipt_id, metadata)
+        self.operations.receipt_metadata(job_id, receipt_id, metadata)
         if content_trace_enabled():
             logger.debug("job %s claimed metadata: %r", job_id, metadata)
         else:
@@ -553,7 +553,7 @@ class Pipeline:
             self.plugins.run(ctx, phase="emit")
             self._checkpoint(ctx, manifest, "emitted")
         if manifest.get("receipt_id"):
-            self.operations.finish_receipt(manifest["receipt_id"], ctx.disposition)
+            self.operations.finish_receipt(ctx.job_id, manifest["receipt_id"], ctx.disposition)
 
         # If retry() died before its own cleanup ran, the original
         # failed/<job_id> folder is left behind even though this commit
@@ -597,7 +597,7 @@ class Pipeline:
             ),
         )
         if manifest.get("receipt_id"):
-            self.operations.finish_receipt(manifest["receipt_id"], "failed")
+            self.operations.finish_receipt(ctx.job_id, manifest["receipt_id"], "failed")
         shutil.rmtree(ctx.staging_dir, ignore_errors=True)
         self._discard_job_lock_dir(ctx.job_id)
         return dest
@@ -770,9 +770,35 @@ class Pipeline:
         # indexed and resolves as a duplicate — exactly the outcome
         # intended, not a stall.
         with self.job_lock(ctx.job_id):
-            return self._finish_run_job(ctx)
+            return self._finish_staged(ctx)
 
-    def _finish_run_job(self, ctx: JobContext) -> JobContext:
+    def stage(self, pdf_path: Path, metadata_path: Path | None, staging_root: Path) -> JobContext | None:
+        """claim() a file and stop — no extraction, no commit. Used by the
+        watcher when a sweep (resume_staged(), run continuously — see
+        cli.py) is doing the actual processing, so the poll loop stays
+        fast and single-writer while extraction can happen on any
+        replica. Returns None for a claim-time refusal (already routed to
+        failed/ and audited, same as run_job()) rather than raising, since
+        the watcher's poll loop treats that as "handled", not an error.
+        claim() itself already resolves an in-progress duplicate without
+        staging anything, so that case just flows through like any other
+        successful claim — there's nothing further for a sweep to do
+        with it either way.
+        """
+        try:
+            return self.claim(pdf_path, metadata_path, staging_root)
+        except (DocumentTooLarge, UnsafeSourceFile) as exc:
+            self.reject_at_claim(pdf_path, type(exc).__name__, str(exc))
+            return None
+
+    def _finish_staged(self, ctx: JobContext) -> JobContext:
+        """A claimed job with no extraction done yet: short-circuit it as
+        a duplicate of an already-indexed job, or extract, scan, and
+        commit it. Shared by run_job() (synchronous — retry(), the CLI)
+        and resume_staged() (asynchronous — crash recovery and, run
+        continuously, the parallel-extraction sweep), so a job staged by
+        one and picked up by the other still gets this check exactly
+        once."""
         from dlpduck.reprocess import latest_index_rows
 
         existing = latest_index_rows(self.index_root, job_ids=[ctx.job_id])
@@ -780,9 +806,12 @@ class Pipeline:
             prior = existing[0]
             ctx.disposition, ctx.reason = prior["disposition"], "duplicate_receipt"
             manifest = self._manifest(ctx)
-            self.operations.finish_receipt(manifest["receipt_id"], "duplicate")
-            self.audit.append("job.received_again", job_id=ctx.job_id, receipt_id=manifest["receipt_id"])
-            shutil.rmtree(ctx.staging_dir)
+            if manifest.get("receipt_id"):
+                self.operations.finish_receipt(ctx.job_id, manifest["receipt_id"], "duplicate")
+                self.audit.append(
+                    "job.received_again", job_id=ctx.job_id, receipt_id=manifest["receipt_id"]
+                )
+            shutil.rmtree(ctx.staging_dir, ignore_errors=True)
             logger.debug("job %s is a duplicate receipt of an existing assessment", ctx.job_id)
             return ctx
         self.process(ctx)
@@ -795,15 +824,18 @@ class Pipeline:
     # ── crash recovery ───────────────────────────────────────────────
 
     def resume_staged(self, staging_root: Path, job_id: str | None = None) -> list[JobContext]:
-        """Re-claim any job left in `_processing/` by a process that died
-        between claim and commit. job_id is content-derived, so re-running
-        is idempotent.
+        """Process anything sitting claimed-but-unfinished in
+        `_processing/` — a job a crashed process never got back to, or
+        (when run continuously; see cli.py) one the watcher only just
+        staged. job_id is content-derived, so re-running is idempotent.
 
         Deliberately NOT @serialized: a large staged queue would otherwise
         hold the global lock (and block console readiness) for as long as
         the whole sweep took. Each job is guarded instead by its own
         non-blocking job_lock(), so two resumes of the *same* job can't
-        race but unrelated jobs recover in parallel.
+        race — which is also what makes it safe to run this on every
+        replica at once: whichever gets a job's lock first extracts it,
+        everyone else skips it and moves on to a different one.
         """
         resumed: list[JobContext] = []
         if not staging_root.is_dir():
@@ -884,21 +916,26 @@ class Pipeline:
             pdf_sha256=hashlib.sha256(pdf_bytes).hexdigest(),
             metadata=allowlist(raw_metadata, self.config.source.metadata_fields),
         )
-        if manifest.get("assessment"):
-            assessment = manifest["assessment"]
-            raw_text = assessment["text"]
-            if raw_text is not None:
-                ctx.text = DocumentText(
-                    **{
-                        **raw_text,
-                        "lines": [TextLine(**line) for line in raw_text["lines"]],
-                    }
-                )
-            ctx.hits = [DLPHit(**{**hit, "severity": Severity(hit["severity"])}) for hit in assessment["hits"]]
-            ctx.disposition, ctx.reason = assessment["disposition"], assessment["reason"]
-            ctx.metadata, ctx.audit_fields = assessment["metadata"], assessment["audit_fields"]
-        else:
-            self.process(ctx)
+        if not manifest.get("assessment"):
+            # No extraction done yet — this is either a genuinely fresh
+            # claim (the watcher only claims now; a sweep does the rest)
+            # or a crash before extraction finished. Either way it's the
+            # same "claimed, unprocessed" state, so it gets the same
+            # duplicate check and process/commit dispatch as run_job().
+            return self._finish_staged(ctx)
+
+        assessment = manifest["assessment"]
+        raw_text = assessment["text"]
+        if raw_text is not None:
+            ctx.text = DocumentText(
+                **{
+                    **raw_text,
+                    "lines": [TextLine(**line) for line in raw_text["lines"]],
+                }
+            )
+        ctx.hits = [DLPHit(**{**hit, "severity": Severity(hit["severity"])}) for hit in assessment["hits"]]
+        ctx.disposition, ctx.reason = assessment["disposition"], assessment["reason"]
+        ctx.metadata, ctx.audit_fields = assessment["metadata"], assessment["audit_fields"]
         if ctx.disposition == "failed":
             self.commit_failed(ctx)
         else:

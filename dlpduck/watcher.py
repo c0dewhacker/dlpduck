@@ -36,7 +36,7 @@ class _Tracked:
 
 
 class Watcher:
-    def __init__(self, config: Config, pipeline: Pipeline):
+    def __init__(self, config: Config, pipeline: Pipeline, is_leader=lambda: True, claim_only: bool = False):
         self.config = config
         self.pipeline = pipeline
         self.staging_root = config.destination.work_dir / "_processing"
@@ -44,6 +44,15 @@ class Watcher:
         self._tracked: dict[Path, _Tracked] = {}
         self._state = "Starting"
         self._current: str | None = None
+        # Claiming a file is not safe from more than one replica at once
+        # (see dlpduck.leader) — actually processing a claimed file is,
+        # so is_leader only ever gates discover_ready()/claim(), never
+        # the extraction sweep that runs alongside this.
+        self._is_leader = is_leader
+        # False (the default): claim AND extract inline, exactly as
+        # always — see cluster.parallel_extraction. True: claim only,
+        # and leave extraction to a sweep (cli.py's run command).
+        self._claim_only = claim_only
 
     def _heartbeat(self):
         write_atomically(self.config.destination.work_dir / "watcher.json", json.dumps({
@@ -137,25 +146,36 @@ class Watcher:
     def _run(self, stop_event=None) -> None:
         logger.info("watching %s (poll every %ss)", self.config.source.path, self.config.source.poll_seconds)
         while stop_event is None or not stop_event.is_set():
-            self._state, self._current = "Watching", None
-            for pdf_path, meta_path in self.discover_ready():
-                try:
-                    self._state, self._current = "Processing", pdf_path.name
-                    ctx = self.pipeline.run_job(pdf_path, meta_path, self.staging_root)
-                    logger.info("job %s -> %s", ctx.job_id, ctx.disposition)
-                except (DocumentTooLarge, UnsafeSourceFile) as exc:
-                    # run_job has already moved it to failed/ and audited
-                    # the refusal. Logged at warning, not exception: this
-                    # is the system working, and a stack trace here would
-                    # read as a bug in the daemon rather than a document
-                    # the daemon declined.
-                    logger.warning("refused %s: %s", pdf_path.name, exc)
-                except Exception:
-                    # Anything else really is unhandled. The file is either
-                    # still in the drop folder (and will be retried, which
-                    # is right for a transient fault) or already staged,
-                    # where the startup sweep will find it.
-                    logger.exception("unhandled error processing %s", pdf_path)
+            if not self._is_leader():
+                self._state, self._current = "Standby", None
+            else:
+                self._state, self._current = "Watching", None
+                for pdf_path, meta_path in self.discover_ready():
+                    try:
+                        if self._claim_only:
+                            self._state, self._current = "Claiming", pdf_path.name
+                            ctx = self.pipeline.stage(pdf_path, meta_path, self.staging_root)
+                            if ctx is not None:
+                                logger.info("staged %s (job %s)", pdf_path.name, ctx.job_id)
+                            # else: a claim-time refusal — stage() already
+                            # routed it to failed/ and audited it.
+                        else:
+                            self._state, self._current = "Processing", pdf_path.name
+                            ctx = self.pipeline.run_job(pdf_path, meta_path, self.staging_root)
+                            logger.info("job %s -> %s", ctx.job_id, ctx.disposition)
+                    except (DocumentTooLarge, UnsafeSourceFile) as exc:
+                        # run_job has already moved it to failed/ and
+                        # audited the refusal (stage() never raises these
+                        # at all — see its own docstring). Logged at
+                        # warning, not exception: this is the system
+                        # working, not a bug in the daemon.
+                        logger.warning("refused %s: %s", pdf_path.name, exc)
+                    except Exception:
+                        # Anything else really is unhandled. The file is
+                        # either still in the drop folder (retried next
+                        # poll, right for a transient fault) or already
+                        # staged, where a sweep will find it.
+                        logger.exception("unhandled error processing %s", pdf_path)
             # Waiting on the event rather than sleeping blindly: a SIGTERM
             # arriving one second into a 30-second poll should not hold
             # shutdown open for the other 29, which is long enough for an
