@@ -648,28 +648,37 @@ def run(config_path: str) -> None:
     election = build_leader_election(config.cluster)
     election.start()
 
-    sweep_thread = None
     if config.cluster.parallel_extraction:
         # Runs on every replica, leader or not: each staged job is
         # protected by its own file lock (see Pipeline.job_lock), so this
         # is what actually spreads extraction across replicas. Claiming
         # new arrivals is the only part that needs a single leader.
-        def sweep_forever() -> None:
-            while not stop_event.is_set():
-                try:
-                    resumed = pipeline.resume_staged(staging_root)
-                    if resumed:
-                        log.info("processed %d staged job(s)", len(resumed))
-                except Exception:
-                    log.exception("extraction sweep failed")
-                stop_event.wait(config.cluster.sweep_interval_seconds)
-
-        sweep_thread = threading.Thread(target=sweep_forever, name="extraction-sweep", daemon=True)
-        sweep_thread.start()
+        sweep_interval = config.cluster.sweep_interval_seconds
+        min_age = 0.0
     else:
         resumed = pipeline.resume_staged(staging_root)
         if resumed:
             log.info("resumed %d interrupted job(s)", len(resumed))
+        # The watcher processes inline here, so staged work is normally
+        # gone within one run_job(). What this catches is a job a
+        # transient error left behind mid-way — before, it sat in
+        # _processing/ until the next restart. Only jobs older than any
+        # in-flight extraction could be are touched, so this never races
+        # the watcher for a job it is still working on.
+        sweep_interval = max(60.0, config.cluster.sweep_interval_seconds)
+        min_age = config.extraction.timeout_seconds + 60
+
+    def sweep_forever() -> None:
+        while not stop_event.wait(sweep_interval):
+            try:
+                resumed = pipeline.resume_staged(staging_root, min_age_seconds=min_age)
+                if resumed:
+                    log.info("processed %d staged job(s)", len(resumed))
+            except Exception:
+                log.exception("extraction sweep failed")
+
+    sweep_thread = threading.Thread(target=sweep_forever, name="extraction-sweep", daemon=True)
+    sweep_thread.start()
 
     watcher = Watcher(
         config, pipeline,
@@ -680,7 +689,7 @@ def run(config_path: str) -> None:
         watcher.run_forever(stop_event)
     finally:
         stop_event.set()
-        if sweep_thread is not None:
+        if sweep_thread.is_alive():
             # A sweep can be legitimately mid-extraction when shutdown
             # starts, and one extraction call is allowed to run for up to
             # extraction.timeout_seconds — joining for only one sweep
@@ -723,6 +732,13 @@ def reindex(config_path: str, do_commit: bool) -> None:
     click.echo(f"  rebuilt from content:  {summary.count('content')}")
     click.echo(f"  rebuilt from PDF (re-extracted): {summary.count('pdf')}")
     click.echo(f"  failed:                {summary.count('failed')}")
+    if summary.skipped:
+        click.secho(
+            f"  skipped {len(summary.skipped)} file(s) not named <job_id>.pdf — not written by "
+            "DLPDuck, left untouched:", fg="yellow",
+        )
+        for path in summary.skipped:
+            click.echo(f"      {path}")
     if summary.ruleset_disagreements:
         click.secho(
             f"  {summary.ruleset_disagreements} document(s) are filed somewhere the CURRENT "

@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import shutil
+import time
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -130,6 +131,16 @@ def _read_bounded_with_stat(
     return (None if len(data) > limit else data), stat
 
 
+def _older_than(job_dir: Path, cutoff: float) -> bool:
+    """Was this staged job last touched before `cutoff`? Judged by its
+    manifest, which every step of a job's progress rewrites."""
+    marker = job_dir / "manifest.json"
+    try:
+        return (marker if marker.exists() else job_dir).stat().st_mtime < cutoff
+    except FileNotFoundError:
+        return False
+
+
 def _unlink_if_same(path: Path, opened: os.stat_result) -> None:
     """Remove only the directory entry that was actually read."""
     try:
@@ -166,6 +177,7 @@ class Pipeline:
         self.index_root = config.destination.work_dir / "index"
         self.content_root = config.destination.work_dir / "content"
         self.plugins = PluginRunner(config.load_plugins(), self.audit)
+        self._warned_uncertain: set[str] = set()
 
     def job_lock(self, job_id: str, *, blocking: bool = True):
         """Per-job_id lock: stops two attempts to claim, recover, or
@@ -944,7 +956,9 @@ class Pipeline:
 
     # ── crash recovery ───────────────────────────────────────────────
 
-    def resume_staged(self, staging_root: Path, job_id: str | None = None) -> list[JobContext]:
+    def resume_staged(
+        self, staging_root: Path, job_id: str | None = None, *, min_age_seconds: float = 0
+    ) -> list[JobContext]:
         """Process anything sitting claimed-but-unfinished in
         `_processing/` — a job a crashed process never got back to, or
         (when run continuously; see cli.py) one the watcher only just
@@ -962,8 +976,11 @@ class Pipeline:
         if not staging_root.is_dir():
             return resumed
 
+        cutoff = time.time() - min_age_seconds
         for job_dir in sorted(staging_root.iterdir()):
             if job_id is not None and job_dir.name != job_id:
+                continue
+            if min_age_seconds and not _older_than(job_dir, cutoff):
                 continue
             if is_resolved(job_dir):
                 continue
@@ -1022,7 +1039,10 @@ class Pipeline:
         manifest_path = job_dir / "manifest.json"
         manifest = json.loads(manifest_path.read_text()) if manifest_path.is_file() else {}
         if "emit_started" in manifest.get("steps", []) and "emitted" not in manifest.get("steps", []):
-            logger.warning("job %s needs explicit delivery retry; leaving staged", recovered_id)
+            # Once per process, not on every periodic sweep.
+            log = logger.debug if recovered_id in self._warned_uncertain else logger.warning
+            self._warned_uncertain.add(recovered_id)
+            log("job %s needs explicit delivery retry; leaving staged", recovered_id)
             return None
         raw_metadata: dict = self._pdf_metadata(pdf_bytes)
         if manifest.get("receipt_id"):

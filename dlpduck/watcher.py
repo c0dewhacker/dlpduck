@@ -187,7 +187,8 @@ class Watcher:
                         # Anything else really is unhandled. The file is
                         # either still in the drop folder (retried next
                         # poll, right for a transient fault) or already
-                        # staged, where a sweep will find it.
+                        # staged, where the periodic sweep (cli.run) will
+                        # pick it up once it is clearly not in flight.
                         logger.exception("unhandled error processing %s", pdf_path)
             # Waiting on the event rather than sleeping blindly: a SIGTERM
             # arriving one second into a 30-second poll should not hold

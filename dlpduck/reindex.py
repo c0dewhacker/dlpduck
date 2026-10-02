@@ -40,7 +40,7 @@ from typing import Literal
 
 import duckdb
 
-from dlpduck.content import read_document_text, write_content_row
+from dlpduck.content import InvalidJobId, read_document_text, validate_job_id, write_content_row
 from dlpduck.index import write_index_row
 from dlpduck.types import JobContext
 
@@ -82,6 +82,9 @@ class ReindexOutcome:
 class ReindexSummary:
     scanned_pdfs: int = 0
     already_indexed: int = 0
+    # PDFs under the archive/quarantine roots whose name is not a job id —
+    # not something this system wrote, so not something to rebuild from.
+    skipped: list[Path] = field(default_factory=list)
     outcomes: list[ReindexOutcome] = field(default_factory=list)
 
     def count(self, source: Source) -> int:
@@ -99,6 +102,7 @@ class ReindexSummary:
 class Reindexer:
     def __init__(self, pipeline):
         self.pipeline = pipeline
+        self._skipped: list[Path] = []
 
     def discover_pdfs(self) -> dict[str, Path]:
         """job_id -> archived PDF path, found by scanning the archive and
@@ -106,11 +110,19 @@ class Reindexer:
         since the filename alone (`<job_id>.pdf`) carries the identity.
         """
         out: dict[str, Path] = {}
+        self._skipped = []
         for root in (
             self.pipeline.config.destination.archive,
             self.pipeline.config.destination.quarantine,
         ):
             for path in Path(root).glob("dt=*/*.pdf"):
+                # One stray file (a copy someone made, `notes.pdf`) used to
+                # stop the whole rebuild with InvalidJobId.
+                try:
+                    validate_job_id(path.stem)
+                except InvalidJobId:
+                    self._skipped.append(path)
+                    continue
                 out[path.stem] = path
         return out
 
@@ -145,7 +157,9 @@ class Reindexer:
         already = indexed_job_ids(self.pipeline.index_root)
         pdfs = self.discover_pdfs()
         purged = self.purged_job_ids()
-        summary = ReindexSummary(scanned_pdfs=len(pdfs), already_indexed=0)
+        summary = ReindexSummary(
+            scanned_pdfs=len(pdfs), already_indexed=0, skipped=list(self._skipped)
+        )
 
         for job_id, pdf_path in sorted(pdfs.items()):
             if job_id in already:

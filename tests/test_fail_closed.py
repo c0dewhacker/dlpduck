@@ -754,3 +754,33 @@ class TestACompanionCannotImpersonateStagingFiles:
         [ctx] = pipeline.resume_staged(staging)
 
         assert ctx.disposition == "archive"
+
+
+class TestThePeriodicSweepOnlyTouchesSettledJobs:
+    """Without parallel extraction the daemon now sweeps _processing/
+    periodically, so a job a transient error left staged no longer waits
+    for a restart — but it must never race the watcher for a job that is
+    still in flight."""
+
+    def _staged(self, tmp_path, config):
+        pipeline = Pipeline(config)
+        staging = config.destination.work_dir / "_processing"
+        pdf = _pdf(tmp_path / "drops" / "doc.pdf", ["ordinary content"])
+        ctx = pipeline.stage(pdf, None, staging)
+        return pipeline, staging, staging / ctx.job_id
+
+    def test_a_fresh_job_is_left_alone(self, tmp_path, config):
+        pipeline, staging, _ = self._staged(tmp_path, config)
+        assert pipeline.resume_staged(staging, min_age_seconds=300) == []
+
+    def test_a_settled_job_is_picked_up(self, tmp_path, config):
+        import os
+        import time
+
+        pipeline, staging, job_dir = self._staged(tmp_path, config)
+        old = time.time() - 600
+        os.utime(job_dir / "manifest.json", (old, old))
+
+        [ctx] = pipeline.resume_staged(staging, min_age_seconds=300)
+
+        assert ctx.disposition == "archive"

@@ -385,10 +385,10 @@ Field reference:
 | `id` | Unique key. Letters, digits, `.`, `_`, `-`; max 64 chars. |
 | `pattern` | Python regex. No implicit flags — write `(?i)` if you want one. |
 | `severity` | Ranked; the document's highest hit wins. |
-| `action` | `quarantine` routes the document; `flag` records it and archives; `ignore` records nothing. |
+| `action` | `quarantine` routes the document; `flag` records it and archives; `ignore` records the masked hit but never affects routing. |
 | `scope` | `line` matches per line; `document` matches the joined text (for values that wrap). |
 | `line_scope` | With a position window: `page` (per page) or `document`. |
-| `min_line` / `max_line` | Inclusive 0-indexed window. Omit both for "anywhere". |
+| `min_line` / `max_line` | Inclusive 0-indexed window. Omit both for "anywhere". A `document`-scope match is placed by the line it starts on. |
 | `from_end` | Count the window from the end (footers). |
 | `validator` | Checksum applied to each candidate before it counts. |
 | `mask_keep` | Trailing characters left visible. Ignored when the match is short enough that a tail would reveal most of it. |

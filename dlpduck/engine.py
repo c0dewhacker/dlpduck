@@ -99,6 +99,12 @@ class DLPEngine:
             if not rule.validator(raw):
                 continue
             line = text.line_at(m.start())
+            # The same position window a line-scope rule gets, judged by the
+            # line the match starts on. It used to be skipped here entirely,
+            # so a document-scope banner rule limited to the first lines of
+            # a page silently matched anywhere.
+            if not rule.in_range(line):
+                continue
             if rule.ctx_regex and not self._context_near(rule, text, line, budget):
                 continue
             # Rebase onto the line the hit is recorded against. These

@@ -65,6 +65,24 @@ class TestDiscoverPdfs:
         assert Reindexer(pipeline).discover_pdfs() == {}
 
 
+    def test_a_stray_pdf_is_skipped_not_fatal(self, tmp_path, hmac_env):
+        """A file someone copied into the archive used to stop the whole
+        rebuild with InvalidJobId."""
+        config = _config(tmp_path)
+        pipeline = Pipeline(config)
+        staging = config.destination.work_dir / "_processing"
+        ctx = pipeline.run_job(_pdf(tmp_path / "memo.pdf", ["ordinary memo"]), None, staging)
+        stray = config.destination.archive / "dt=2026-01-01" / "notes.pdf"
+        stray.parent.mkdir(parents=True)
+        _pdf(stray, ["not a job"])
+        shutil.rmtree(config.destination.work_dir / "index")
+
+        summary = Reindexer(pipeline).run(commit=True)
+
+        assert summary.skipped == [stray]
+        assert [o.job_id for o in summary.outcomes] == [ctx.job_id]
+
+
 class TestIndexedJobIds:
     def test_empty_index_returns_empty_set(self, tmp_path, hmac_env):
         config = _config(tmp_path)
