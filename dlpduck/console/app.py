@@ -35,6 +35,7 @@ from dlpduck.console.csrf import get_csrf_token, verify_csrf
 from dlpduck.console.rbac import ALL_ROLES, has_permission
 from dlpduck.content import InvalidJobId, has_content, read_document_text, validate_job_id
 from dlpduck.failures import FailureQueue
+from dlpduck.images import sniff
 from dlpduck.index import AssessmentExists
 from dlpduck.masking import mask
 from dlpduck.pipeline import Pipeline
@@ -51,6 +52,13 @@ logger = logging.getLogger("dlpduck.console")
 # row. Show the newest page of them and say when there are more, rather
 # than rendering a year of history into one table.
 JOBS_PAGE_SIZE = 100
+
+_FAILED_MEDIA = {
+    "pdf": ("application/pdf", "pdf"),
+    "tiff": ("image/tiff", "tif"),
+    "jpeg": ("image/jpeg", "jpg"),
+    "png": ("image/png", "png"),
+}
 
 
 def _rederive_hit_value(doc, hit: dict[str, Any], rules) -> str | None:
@@ -443,8 +451,17 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
             raise HTTPException(404, str(exc)) from None
         if path.is_symlink() or not path.is_file():
             raise HTTPException(404, "Regular PDF unavailable")
+        # A scanner image refused at claim (undecodable, too many frames)
+        # is kept exactly as it arrived, so it may not be a PDF at all.
+        # Served as what it is, and as a download rather than inline.
+        with open(path, "rb") as handle:
+            detected = sniff(handle.read(1024))
+        media_type, extension = _FAILED_MEDIA.get(detected or "", ("application/octet-stream", "bin"))
         pipeline.audit.append("pdf.failed_viewed", job_id=job_id, actor=user.username)
-        return FileResponse(path, media_type="application/pdf", filename=f"{job_id}.pdf")
+        return FileResponse(
+            path, media_type=media_type, filename=f"{job_id}.{extension}",
+            content_disposition_type="inline" if detected == "pdf" else "attachment",
+        )
 
     @app.post("/failed/{kind}/{job_id}/{action}", response_model=None)
     def failed_action(request: Request, kind: str, job_id: str, action: str,

@@ -1958,3 +1958,22 @@ class TestMalformedInputIsRefusedNotCrashed:
             )
             self._probe(client, "GET", "/login", params={"auth": value})
             self._probe(client, "GET", f"/jobs/{value}")
+
+
+def test_a_refused_scanner_image_downloads_as_what_it_is(env):
+    """An image refused at claim is kept as it arrived — serving it as
+    application/pdf would hand the browser a file it cannot open."""
+    pipeline, config = env["pipeline"], env["config"]
+    bad = config.source.path / "broken.tif"
+    bad.write_bytes(b"II*\x00" + b"\xff" * 32)
+    with pytest.raises(Exception):  # noqa: B017 — the refusal itself is covered elsewhere
+        pipeline.run_job(bad, None, config.destination.work_dir / "_processing")
+    [folder] = (config.destination.work_dir / "failed").iterdir()
+    client = env["client"]
+    _login(client, "admin1")
+
+    resp = client.get(f"/failed/failed/{folder.name}/pdf")
+
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "image/tiff"
+    assert resp.headers["content-disposition"].startswith("attachment")

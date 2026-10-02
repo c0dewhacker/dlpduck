@@ -153,6 +153,15 @@ class DocumentTooLarge(Exception):
     """Raised at claim time when limits.max_bytes or limits.max_pages is exceeded."""
 
 
+class TooManyPages(Exception):
+    """Raised by extraction when a document has more pages than
+    limits.max_pages — checked on open, before any page is rendered."""
+
+    def __init__(self, page_count: int):
+        super().__init__(f"document has {page_count} pages")
+        self.page_count = page_count
+
+
 class PageTooLarge(Exception):
     """Raised when a page's declared size means it cannot be rasterised
     within the extractor's pixel cap at any usable resolution. Handled as

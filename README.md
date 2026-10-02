@@ -34,7 +34,7 @@ documents under new rules, approve releases, and purge retained content.
 
 | Built for | What DLPDuck does |
 |---|---|
-| Scanners and MFPs | Waits for stable PDF and companion metadata files before claiming them |
+| Scanners and MFPs | Waits for stable PDF, TIFF, JPEG or PNG files and their companion metadata before claiming them |
 | Mixed PDFs | Uses native text where it is trustworthy and OCR on sparse or image-bearing pages |
 | Position-sensitive policy | Matches by page, line, document scope, and configurable line ranges |
 | Sensitive findings | Stores masked values and keyed correlation digests, never the raw match |
@@ -65,7 +65,7 @@ documents under new rules, approve releases, and purge retained content.
 
 ## How it works
 
-1. The watcher waits until a PDF stops changing, then moves it into staging.
+1. The watcher waits until a PDF (or a TIFF/JPEG/PNG scan, converted losslessly to PDF) stops changing, then moves it into staging.
 2. Each page uses native text when suitable and OCR when it is sparse or contains images.
 3. Rules inspect lines or the complete document and mask every recorded match.
 4. Enrichment plugins can add routing context before the final decision.
@@ -222,7 +222,8 @@ umask: "0077"                   # owner-only for everything written; null to inh
 source:
   name: mfp-3f                  # recorded on every job
   path: /srv/dlpduck/drops
-  pdf_suffix: .pdf
+  pdf_suffix: .pdf              # case-insensitive
+  image_suffixes: [.tif, .tiff, .jpg, .jpeg, .png]  # converted to PDF at claim
   metadata_format: none         # xml | json | text | none
   metadata_suffix: .xml         # companion file: scan.pdf + scan.xml
   metadata_fields: []           # ALLOWLIST — see the note below
@@ -235,12 +236,14 @@ limits:
   max_pages: 500
   rule_budget_ms: 2000          # per rule, per document
   max_metadata_bytes: 1048576   # 1 MB — companion files are bounded too
+  max_image_pixels: 150000000   # per image frame, checked before decoding
 
 extraction:
   dpi: 150                      # OCR raster resolution
   native_min_chars: 20          # per page: below this, the page goes to OCR
   isolate_worker: true          # contain parser/OCR hangs in a child process
   timeout_seconds: 120          # whole-document extraction budget
+  worker_memory_mb: 4096        # address-space cap for the isolated worker
 
 dlp:
   quarantine_on_degraded: true  # fail closed

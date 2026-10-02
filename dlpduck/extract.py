@@ -11,7 +11,7 @@ from pypdfium2 import raw as pdfium_c
 from rapidocr_onnxruntime import RapidOCR
 
 from dlpduck.pdfium import PDFIUM_LOCK, is_password_error, open_document
-from dlpduck.types import DocumentText, EncryptedDocument, PageTooLarge, TextLine
+from dlpduck.types import DocumentText, EncryptedDocument, PageTooLarge, TextLine, TooManyPages
 
 logger = logging.getLogger("dlpduck.extract")
 
@@ -37,10 +37,23 @@ class LineExtractor:
     MAX_RASTER_PIXELS = 40_000_000  # ~40MP, about 120MB of RGB pixels
     MIN_DPI = 36  # below this OCR is worthless anyway — refuse instead
 
-    def __init__(self, dpi: int = 150, *, isolate: bool = False, timeout: float = 120):
+    def __init__(
+        self,
+        dpi: int = 150,
+        *,
+        isolate: bool = False,
+        timeout: float = 120,
+        max_pages: int | None = None,
+        memory_mb: int | None = None,
+    ):
         self.dpi = dpi
         self.isolate = isolate
         self.timeout = timeout
+        # Checked on open, before any page is rendered, and inside the
+        # worker when isolated — counting pages means parsing the PDF,
+        # which is exactly the work that must not happen in the daemon.
+        self.max_pages = max_pages
+        self.memory_mb = memory_mb
         # One page per worker process at the pipeline level — stop
         # ONNXRuntime grabbing every core inside every worker and fighting
         # the pool for them.
@@ -50,7 +63,10 @@ class LineExtractor:
         if self.isolate:
             from dlpduck.extract_worker import extract_isolated
 
-            return extract_isolated(pdf_bytes, self.dpi, self.NATIVE_MIN_CHARS, self.timeout)
+            return extract_isolated(
+                pdf_bytes, self.dpi, self.NATIVE_MIN_CHARS, self.timeout,
+                max_pages=self.max_pages, memory_mb=self.memory_mb,
+            )
         return self._extract(pdf_bytes)
 
     def _extract(self, pdf_bytes: bytes) -> DocumentText:
@@ -63,6 +79,8 @@ class LineExtractor:
                 raise
 
             with document:
+                if self.max_pages is not None and len(document) > self.max_pages:
+                    raise TooManyPages(len(document))
                 out = DocumentText(page_count=len(document))
                 n = 0
                 for idx in range(len(document)):

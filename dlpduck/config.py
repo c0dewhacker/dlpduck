@@ -19,6 +19,13 @@ class SourceConfig(BaseModel):
     name: str
     path: Path
     pdf_suffix: str = ".pdf"
+    # Scanner image formats picked up alongside PDFs and converted to one
+    # at claim (see dlpduck.images). Matching, like pdf_suffix, ignores
+    # case — scanners routinely write SCAN0001.PDF or .TIF. An empty list
+    # turns image intake off.
+    image_suffixes: list[str] = Field(
+        default_factory=lambda: [".tif", ".tiff", ".jpg", ".jpeg", ".png"]
+    )
     metadata_format: Literal["xml", "json", "text", "none"] = "none"
     metadata_suffix: str = ".xml"
     metadata_fields: list[str] = Field(default_factory=list)  # allowlist only
@@ -32,6 +39,18 @@ class SourceConfig(BaseModel):
     metadata_grace_polls: int = Field(default=3, ge=0)
 
 
+    def accepts(self, name: str) -> bool:
+        """Is this drop-folder filename one this source picks up? Case is
+        ignored: a scanner writing SCAN0001.PDF must not leave documents
+        sitting unassessed in the drop folder forever."""
+        lowered = name.lower()
+        return any(
+            lowered.endswith(suffix.lower())
+            for suffix in (self.pdf_suffix, *self.image_suffixes)
+            if suffix
+        )
+
+
 class LimitsConfig(BaseModel):
     max_bytes: int = Field(default=200 * 1024 * 1024, gt=0)
     max_pages: int = Field(default=500, gt=0)
@@ -41,12 +60,21 @@ class LimitsConfig(BaseModel):
     # one-line PDF with a multi-gigabyte .xml beside it could exhaust the
     # daemon. Scanner metadata is a few KB; 1 MB is already generous.
     max_metadata_bytes: int = Field(default=1024 * 1024, gt=0)
+    # Per frame of a scanner image, checked from the image header before
+    # any pixel is decoded. 150 MP is an A3 page at 600 dpi with room to
+    # spare; a frame declaring more is refused rather than allocated.
+    max_image_pixels: int = Field(default=150_000_000, gt=0)
 
 
 class ExtractionConfig(BaseModel):
     dpi: int = Field(default=150, ge=36, le=600)
     timeout_seconds: float = Field(default=120, gt=0)
     isolate_worker: bool = True
+    # Address-space ceiling for each isolated worker, in MB. A hostile file
+    # that asks a parser for an enormous allocation then fails that one
+    # worker instead of pushing the host into swap or the OOM killer.
+    # 4096 leaves OCR comfortable headroom; null removes the cap.
+    worker_memory_mb: int | None = Field(default=4096, ge=512)
     native_min_chars: int = Field(default=20, ge=0)  # evaluated per page
 
 

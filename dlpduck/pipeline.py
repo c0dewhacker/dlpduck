@@ -12,9 +12,10 @@ import logging
 import os
 import shutil
 import uuid
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from dlpduck.audit import AuditLog
 from dlpduck.config import Config
@@ -29,11 +30,12 @@ from dlpduck.durability import (
 )
 from dlpduck.engine import DLPEngine
 from dlpduck.extract import LineExtractor
+from dlpduck.extract_worker import convert_isolated, inspect_isolated
+from dlpduck.images import IMAGE_FORMATS, UnreadableImage, image_to_pdf, sniff
 from dlpduck.index import write_index_row
 from dlpduck.metadata import MetadataParserFactory, allowlist
 from dlpduck.operations import LockContended, OperationalStore, operation_lock, serialized
 from dlpduck.pdf_metadata import extract_pdf_metadata
-from dlpduck.pdfium import page_count
 from dlpduck.plugins.base import PluginError, PluginRunner
 from dlpduck.rules import ruleset_version
 from dlpduck.tracing import content_trace_enabled
@@ -46,10 +48,27 @@ from dlpduck.types import (
     RuleBudgetExceeded,
     Severity,
     TextLine,
+    TooManyPages,
     UnsafeSourceFile,
 )
 
 logger = logging.getLogger("dlpduck.pipeline")
+
+
+# What claim refuses outright, before a job exists: routed to failed/ by
+# reject_at_claim() rather than retried from the drop folder forever.
+CLAIM_REFUSALS = (DocumentTooLarge, UnsafeSourceFile, UnreadableImage)
+
+
+@dataclass(frozen=True)
+class _Source:
+    """A drop-folder file, read once and in the form the pipeline stores:
+    `data` is always PDF bytes. `origin` describes the scanner image it was
+    converted from, or is None for a file that arrived as a PDF."""
+
+    data: bytes
+    opened: os.stat_result
+    origin: dict | None = None
 
 
 def content_job_id(pdf_bytes: bytes) -> str:
@@ -129,6 +148,8 @@ class Pipeline:
             dpi=config.extraction.dpi,
             isolate=config.extraction.isolate_worker,
             timeout=config.extraction.timeout_seconds,
+            max_pages=config.limits.max_pages,
+            memory_mb=config.extraction.worker_memory_mb,
         )
         self.extractor.NATIVE_MIN_CHARS = config.extraction.native_min_chars
         self.engine = DLPEngine(
@@ -150,6 +171,64 @@ class Pipeline:
         retry the *same* job from racing, without making unrelated
         job_ids contend."""
         return operation_lock(self.config.destination.work_dir / "_locks" / job_id, blocking=blocking)
+
+    def _pdf_metadata(self, pdf_bytes: bytes) -> dict:
+        """The PDF's own Info dictionary. Reading it means parsing the PDF,
+        so it happens in the isolated worker whenever extraction does."""
+        if self.config.extraction.isolate_worker:
+            return inspect_isolated(
+                pdf_bytes,
+                timeout=self.config.extraction.timeout_seconds,
+                memory_mb=self.config.extraction.worker_memory_mb,
+            )
+        return extract_pdf_metadata(pdf_bytes)
+
+    def _read_source(self, path: Path) -> _Source:
+        """Read a drop-folder file without following a symlink, bounded by
+        limits.max_bytes, and convert a scanner image to PDF.
+
+        The format is decided from the content, not the filename: a retry
+        restores a failed job under its original name (scan.tif) while the
+        stored document is already the converted PDF, and a scanner that
+        mislabels its output should not decide how it is parsed.
+        """
+        limit = self.config.limits.max_bytes
+        raw, opened = _read_bounded_with_stat(path, limit)
+        if opened.st_size > limit:
+            raise DocumentTooLarge(f"{path} is {opened.st_size} bytes, over the configured limit")
+        # Read with the limit as a hard ceiling rather than trusting the
+        # stat above: the file can still grow between the two (a writer
+        # that wasn't finished after all), and the limit exists to bound
+        # what actually reaches memory.
+        if raw is None:
+            raise DocumentTooLarge(f"{path} exceeds the configured {limit}-byte limit")
+
+        kind = sniff(raw)
+        if kind in IMAGE_FORMATS:
+            pdf = self._convert_image(raw)
+            origin = {
+                "source_format": kind,
+                "source_sha256": hashlib.sha256(raw).hexdigest(),
+                "source_bytes": len(raw),
+            }
+            return _Source(pdf, opened, origin)
+        if kind is None and path.suffix.lower() in {
+            s.lower() for s in self.config.source.image_suffixes
+        }:
+            raise UnreadableImage(f"{path.name} is not a TIFF, JPEG or PNG image")
+        return _Source(raw, opened)
+
+    def _convert_image(self, raw: bytes) -> bytes:
+        limits, extraction = self.config.limits, self.config.extraction
+        if extraction.isolate_worker:
+            return convert_isolated(
+                raw,
+                max_pages=limits.max_pages,
+                max_pixels=limits.max_image_pixels,
+                timeout=extraction.timeout_seconds,
+                memory_mb=extraction.worker_memory_mb,
+            )
+        return image_to_pdf(raw, max_pages=limits.max_pages, max_pixels=limits.max_image_pixels)
 
     def _discard_job_lock_dir(self, job_id: str) -> None:
         """claim() now takes job_lock() for every arrival, not just
@@ -183,7 +262,7 @@ class Pipeline:
         """
         receipt_id = uuid.uuid4().hex
         received_at = datetime.now(UTC)
-        receipt_metadata = extract_pdf_metadata(content_bytes)
+        receipt_metadata = self._pdf_metadata(content_bytes)
         opened_metadata = None
         if metadata_path is not None and metadata_path.is_symlink():
             self.audit.append(
@@ -226,7 +305,14 @@ class Pipeline:
 
     # ── claim ────────────────────────────────────────────────────────
 
-    def claim(self, pdf_path: Path, metadata_path: Path | None, staging_root: Path) -> JobContext:
+    def claim(
+        self,
+        pdf_path: Path,
+        metadata_path: Path | None,
+        staging_root: Path,
+        *,
+        source: _Source | None = None,
+    ) -> JobContext:
         """Safely read and claim a source pair into a job-scoped staging
         directory, then build its initial JobContext. Raises
         DocumentTooLarge / IOError before a complete file is accepted if
@@ -246,21 +332,9 @@ class Pipeline:
         # and that file's contents would end up extracted into the content
         # store — searchable, and downloadable through the console.
         logger.debug("claiming %s (source=%s)", pdf_path.name, self.config.source.name)
-        pdf_bytes, opened_pdf = _read_bounded_with_stat(
-            pdf_path, self.config.limits.max_bytes
-        )
-        size = opened_pdf.st_size
-        if size > self.config.limits.max_bytes:
-            raise DocumentTooLarge(f"{pdf_path} is {size} bytes, over the configured limit")
-
-        # Read with the limit as a hard ceiling rather than trusting the
-        # stat above: the file can still grow between the two (a writer
-        # that wasn't finished after all), and the limit exists to bound
-        # what actually reaches memory.
-        if pdf_bytes is None:
-            raise DocumentTooLarge(
-                f"{pdf_path} exceeds the configured {self.config.limits.max_bytes}-byte limit"
-            )
+        if source is None:
+            source = self._read_source(pdf_path)
+        pdf_bytes, opened_pdf = source.data, source.opened
         job_id = content_job_id(pdf_bytes)
         pdf_sha256 = hashlib.sha256(pdf_bytes).hexdigest()
 
@@ -276,7 +350,8 @@ class Pipeline:
         try:
             with self.job_lock(job_id, blocking=False):
                 return self._claim_locked(
-                    pdf_path, opened_pdf, metadata_path, staging_root, job_id, pdf_bytes, pdf_sha256
+                    pdf_path, opened_pdf, metadata_path, staging_root, job_id, pdf_bytes,
+                    pdf_sha256, source.origin,
                 )
         except LockContended:
             received_at, metadata = self._record_duplicate_arrival(
@@ -303,6 +378,7 @@ class Pipeline:
         job_id: str,
         pdf_bytes: bytes,
         pdf_sha256: str,
+        origin: dict | None = None,
     ) -> JobContext:
         staging_dir = staging_root / job_id
         staging_dir.mkdir(parents=True, exist_ok=True)
@@ -312,9 +388,11 @@ class Pipeline:
         # an attacker swaps that directory entry for a symlink.
         receipt_id = uuid.uuid4().hex
         received_at = datetime.now(UTC)
-        manifest = {"receipt_id": receipt_id, "received_at": received_at.isoformat(),
+        manifest: dict[str, Any] = {"receipt_id": receipt_id, "received_at": received_at.isoformat(),
                     "filename": pdf_path.name, "source_name": self.config.source.name,
                     "steps": []}
+        if origin is not None:
+            manifest["origin"] = origin
         write_atomically(staging_dir / "manifest.json", json.dumps(manifest))
         write_bytes_durably(staged_pdf, pdf_bytes)
         _unlink_if_same(pdf_path, opened_pdf)
@@ -325,10 +403,17 @@ class Pipeline:
             manifest["filename"],
             self.config.source.name,
         )
+        if origin is not None:
+            # The archived PDF is not byte-identical to what the scanner
+            # wrote, so what it was converted from is part of the record.
+            self.audit.append(
+                "document.converted", job_id=job_id, receipt_id=receipt_id,
+                filename=pdf_path.name, **origin,
+            )
 
         # Read the PDF's own Info dictionary first; a companion
         # file, when one exists, wins on any key they both set.
-        raw_metadata: dict = extract_pdf_metadata(pdf_bytes)
+        raw_metadata: dict = self._pdf_metadata(pdf_bytes)
         if metadata_path is not None and metadata_path.is_symlink():
             shutil.move(str(metadata_path), str(staging_dir / STAGED_REJECTED_COMPANION))
             self.audit.append(
@@ -403,21 +488,16 @@ class Pipeline:
     def process(self, ctx: JobContext) -> None:
         pdf_bytes = ctx.pdf_path.read_bytes()
 
-        detected_page_count = page_count(pdf_bytes)
-        if detected_page_count is not None and detected_page_count > self.config.limits.max_pages:
-            ctx.disposition = "failed"
-            ctx.reason = "page_count_exceeds_limit"
-            self.audit.append(
-                "job.failed",
-                job_id=ctx.job_id,
-                reason=ctx.reason,
-                page_count=detected_page_count,
-            )
-            return
-
         logger.debug("job %s extracting (%d bytes)", ctx.job_id, len(pdf_bytes))
         try:
             ctx.text = self.extractor.extract(pdf_bytes)
+        except TooManyPages as exc:
+            ctx.disposition = "failed"
+            ctx.reason = "page_count_exceeds_limit"
+            self.audit.append(
+                "job.failed", job_id=ctx.job_id, reason=ctx.reason, page_count=exc.page_count
+            )
+            return
         except EncryptedDocument:
             ctx.disposition = "failed"
             ctx.reason = "encrypted"
@@ -448,6 +528,17 @@ class Pipeline:
             self.audit.append(
                 "job.failed", job_id=ctx.job_id, reason=ctx.reason, rule_id=exc.rule_id
             )
+            return
+        except Exception as exc:
+            # A rule or validator that raises (a custom validator meeting
+            # input it didn't expect, say) means this document could not
+            # be assessed. That is a failure to route, not a crash to let
+            # escape: escaping left the job staged and retried on every
+            # sweep, failing identically each time.
+            logger.exception("job %s: scanning raised", ctx.job_id)
+            ctx.disposition = "failed"
+            ctx.reason = f"scan_error: {type(exc).__name__}"
+            self.audit.append("job.failed", job_id=ctx.job_id, reason=ctx.reason)
             return
         logger.debug("job %s scanned: %d hit(s)", ctx.job_id, len(ctx.hits))
 
@@ -745,21 +836,20 @@ class Pipeline:
         # commit sees "stores" already checkpointed and no-ops), so that
         # boundary is enough. Detect a duplicate arrival before claiming so
         # an earlier job staged during an uncertain emit isn't overwritten.
-        if not pdf_path.is_symlink():
-            try:
-                duplicate_bytes, opened_pdf = _read_bounded_with_stat(
-                    pdf_path, self.config.limits.max_bytes
-                )
-            except UnsafeSourceFile:
-                duplicate_bytes = None
-            if duplicate_bytes is not None:
-                duplicate_id = content_job_id(duplicate_bytes)
+        #
+        # The file is read (and, for a scanner image, converted) exactly
+        # once here and handed to claim(), rather than read for this check
+        # and then again to claim it.
+        try:
+            source = None if pdf_path.is_symlink() else self._read_source(pdf_path)
+            if source is not None:
+                duplicate_id = content_job_id(source.data)
                 from dlpduck.reprocess import latest_index_rows
 
                 existing = latest_index_rows(self.index_root, job_ids=[duplicate_id])
                 if existing:
                     received_at, receipt_metadata = self._record_duplicate_arrival(
-                        duplicate_id, pdf_path, opened_pdf, metadata_path, duplicate_bytes,
+                        duplicate_id, pdf_path, source.opened, metadata_path, source.data,
                         event="job.received_again",
                     )
                     return JobContext(
@@ -768,14 +858,13 @@ class Pipeline:
                         source_name=self.config.source.name,
                         staging_dir=staging_root / duplicate_id,
                         pdf_path=pdf_path,
-                        pdf_sha256=hashlib.sha256(duplicate_bytes).hexdigest(),
+                        pdf_sha256=hashlib.sha256(source.data).hexdigest(),
                         metadata=receipt_metadata,
                         disposition=existing[0]["disposition"],
                         reason="duplicate_receipt",
                     )
-        try:
-            ctx = self.claim(pdf_path, metadata_path, staging_root)
-        except (DocumentTooLarge, UnsafeSourceFile) as exc:
+            ctx = self.claim(pdf_path, metadata_path, staging_root, source=source)
+        except CLAIM_REFUSALS as exc:
             # A refusal, not a crash — route it fail-closed rather than
             # letting it escape to a caller whose only option is to log it
             # and try the same file again next poll.
@@ -818,7 +907,7 @@ class Pipeline:
         """
         try:
             return self.claim(pdf_path, metadata_path, staging_root)
-        except (DocumentTooLarge, UnsafeSourceFile) as exc:
+        except CLAIM_REFUSALS as exc:
             self.reject_at_claim(pdf_path, type(exc).__name__, str(exc))
             return None
 
@@ -934,7 +1023,7 @@ class Pipeline:
         if "emit_started" in manifest.get("steps", []) and "emitted" not in manifest.get("steps", []):
             logger.warning("job %s needs explicit delivery retry; leaving staged", recovered_id)
             return None
-        raw_metadata: dict = extract_pdf_metadata(pdf_bytes)
+        raw_metadata: dict = self._pdf_metadata(pdf_bytes)
         if manifest.get("receipt_id"):
             self.operations.receipt(
                 manifest["receipt_id"],

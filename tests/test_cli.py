@@ -121,6 +121,24 @@ class TestScan:
             (env["tmp"] / "archive").glob("dt=*/*.pdf")
         )
 
+    def test_a_scanner_image_is_scanned_like_a_pdf(self, env, runner):
+        from tests.test_images import _scanned_tiff
+
+        scan = env["tmp"] / "card.tif"
+        scan.write_bytes(_scanned_tiff(["Card 4111 1111 1111 1111"]))
+        result = runner.invoke(main, ["scan", str(scan), "--config", str(env["config"])])
+
+        assert result.exit_code == 0, result.output
+        assert "pan.generic" in result.output
+
+    def test_an_unreadable_image_is_reported_as_refused(self, env, runner):
+        scan = env["tmp"] / "broken.png"
+        scan.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
+        result = runner.invoke(main, ["scan", str(scan), "--config", str(env["config"])])
+
+        assert result.exit_code == 1
+        assert "refused at claim" in result.output
+
     def test_clean_document_reports_no_hits(self, env, runner):
         pdf = _pdf(env["tmp"] / "clean.pdf", ["An ordinary memo about lunch."])
         result = runner.invoke(main, ["scan", str(pdf), "--config", str(env["config"])])
@@ -493,7 +511,7 @@ class TestTestRulesCommand:
             main, ["test-rules", "--corpus", str(empty), "--config", str(env["config"])]
         )
         assert result.exit_code == 1
-        assert "no .pdf files" in result.output
+        assert "no documents found" in result.output
 
     def test_an_unreadable_document_is_skipped_not_fatal(self, env, runner, tmp_path):
         corpus = tmp_path / "corpus"

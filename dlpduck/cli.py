@@ -18,6 +18,7 @@ from dlpduck.config import ConfigError, config_warnings, load_config, validate_c
 from dlpduck.content import InvalidJobId
 from dlpduck.engine import DLPEngine
 from dlpduck.extract import LineExtractor
+from dlpduck.images import UnreadableImage
 from dlpduck.index import AssessmentExists, compact_partition, plan_compaction
 from dlpduck.leader import build_leader_election
 from dlpduck.pipeline import Pipeline
@@ -26,7 +27,7 @@ from dlpduck.retention import apply_retention, plan_retention
 from dlpduck.search import QueryTimeout, SearchError, audit_terms
 from dlpduck.search import search as run_search
 from dlpduck.tracing import configure_logging
-from dlpduck.types import EncryptedDocument, RuleBudgetExceeded
+from dlpduck.types import DocumentTooLarge, EncryptedDocument, RuleBudgetExceeded
 from dlpduck.watcher import Watcher
 
 configure_logging()
@@ -48,6 +49,29 @@ def _parse_date_option(value: str | None, flag: str) -> date | None:
     except ValueError:
         click.secho(f"{flag} must be a date in YYYY-MM-DD form, got {value!r}", fg="red")
         sys.exit(1)
+
+
+def _document_bytes(path: Path, config) -> bytes:
+    """A document as the pipeline would store it: PDF bytes, with a
+    scanner image converted first (in the isolated worker when extraction
+    is isolated), so `scan` and `test-rules` see what ingest would."""
+    from dlpduck.extract_worker import convert_isolated
+    from dlpduck.images import IMAGE_FORMATS, image_to_pdf, sniff
+
+    data = path.read_bytes()
+    if sniff(data) not in IMAGE_FORMATS:
+        return data
+    if config.extraction.isolate_worker:
+        return convert_isolated(
+            data,
+            max_pages=config.limits.max_pages,
+            max_pixels=config.limits.max_image_pixels,
+            timeout=config.extraction.timeout_seconds,
+            memory_mb=config.extraction.worker_memory_mb,
+        )
+    return image_to_pdf(
+        data, max_pages=config.limits.max_pages, max_pixels=config.limits.max_image_pixels
+    )
 
 
 @main.command("validate-config")
@@ -79,7 +103,7 @@ def validate_config_cmd(config_path: str) -> None:
 @click.argument("pdf_path", type=click.Path(exists=True))
 @click.option("--config", "config_path", required=True, type=click.Path(exists=True))
 def scan(pdf_path: str, config_path: str) -> None:
-    """Dry run one document: print extracted lines with page/line indices
+    """Dry run one document (PDF, or a TIFF/JPEG/PNG scan): print extracted lines with page/line indices
     and every hit. Nothing is written."""
     config = load_config(config_path)
     extractor = LineExtractor(
@@ -94,11 +118,13 @@ def scan(pdf_path: str, config_path: str) -> None:
         rule_budget_seconds=config.rule_budget_seconds,
     )
 
-    pdf_bytes = Path(pdf_path).read_bytes()
     try:
-        text = extractor.extract(pdf_bytes)
+        text = extractor.extract(_document_bytes(Path(pdf_path), config))
     except EncryptedDocument:
         click.secho("document is encrypted — would fail closed", fg="red")
+        sys.exit(1)
+    except (DocumentTooLarge, UnreadableImage) as exc:
+        click.secho(f"{exc} — would be refused at claim", fg="red")
         sys.exit(1)
 
     click.echo(f"{text.page_count} pages, {text.ocr_page_count} via OCR, degraded={text.degraded}")
@@ -151,15 +177,15 @@ def test_rules(corpus: str, config_path: str, rule_id: str | None) -> None:
 
     counts: Counter[str] = Counter()
     samples: dict[str, list[str]] = {}
-    pdfs = sorted(Path(corpus).glob("*.pdf"))
+    pdfs = sorted(p for p in Path(corpus).iterdir() if config.source.accepts(p.name))
     if not pdfs:
-        click.secho(f"no .pdf files found under {corpus}", fg="red")
+        click.secho(f"no documents found under {corpus}", fg="red")
         sys.exit(1)
 
     with click.progressbar(pdfs, label="scanning corpus") as bar:
         for pdf_path in bar:
             try:
-                text = extractor.extract(pdf_path.read_bytes())
+                text = extractor.extract(_document_bytes(pdf_path, config))
                 hits = engine.scan(text)
             except Exception as exc:
                 click.echo(f"\n  skipped {pdf_path.name}: {exc}")

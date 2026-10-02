@@ -29,6 +29,7 @@ dependencies = [
   "httpx>=0.28.1",
   "regex>=2026.9.3",
   "pypdfium2>=5.13.0",
+  "pillow>=12.3.0",
 ]
 
 [project.scripts]

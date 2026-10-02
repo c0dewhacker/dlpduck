@@ -11,8 +11,7 @@ from pathlib import Path
 from dlpduck.content import validate_job_id
 from dlpduck.durability import copy_durably, write_atomically
 from dlpduck.operations import LockContended, serialized
-from dlpduck.pipeline import is_resolved
-from dlpduck.types import DocumentTooLarge, UnsafeSourceFile
+from dlpduck.pipeline import CLAIM_REFUSALS, is_resolved
 
 logger = logging.getLogger("dlpduck.failures")
 
@@ -168,7 +167,7 @@ class FailureQueue:
             os.utime(source, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
             try:
                 ctx = self.pipeline.run_job(source, None, self.root / "_processing")
-            except (DocumentTooLarge, UnsafeSourceFile):
+            except CLAIM_REFUSALS:
                 # Same refusal as before — reject_at_claim already routed
                 # it back to this folder (same fingerprint) with the
                 # failure reason refreshed; nothing else to do here.

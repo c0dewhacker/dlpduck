@@ -11,7 +11,11 @@ umask: "0077"
 source:
   name: "mfp-floor-3"
   path: /data/printer_drops        # mount SMB/S3 here at the OS layer, not in-app
-  pdf_suffix: .pdf
+  pdf_suffix: .pdf                 # matched regardless of case (SCAN.PDF too)
+  # Scanner images are picked up too, converted losslessly to a PDF at
+  # claim, and processed like any other document. The original's format
+  # and SHA-256 are recorded in the audit trail. [] turns image intake off.
+  image_suffixes: [.tif, .tiff, .jpg, .jpeg, .png]
   metadata_format: xml             # xml | json | text | none
   metadata_suffix: .xml
   # Allowlist; every other key is dropped from BOTH the companion
@@ -39,6 +43,9 @@ limits:
   # Real scanner metadata is a few KB; anything past this is ignored and
   # audited rather than read into memory.
   max_metadata_bytes: 1048576      # 1 MB
+  # Per frame of a scanner image, read from its header before any pixel
+  # is decoded — a decompression bomb is refused, not allocated.
+  max_image_pixels: 150000000
 
 extraction:
   dpi: 150
@@ -50,6 +57,10 @@ extraction:
   # daemon with it.
   timeout_seconds: 120
   isolate_worker: true
+  # Everything that parses a dropped file — extraction, the claim-time
+  # read of a PDF's metadata, image decoding — runs in that child, with
+  # its address space capped here (MB; null removes the cap).
+  worker_memory_mb: 4096
 
 dlp:
   quarantine_on_degraded: true     # fail closed
