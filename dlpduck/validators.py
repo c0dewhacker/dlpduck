@@ -28,7 +28,7 @@ def get_validator(name: str) -> Callable[[str], bool]:
 
 
 def _digits(s: str) -> list[int]:
-    """The decimal digits in `s`, as ints.
+    r"""The decimal digits in `s`, as ints.
 
     isdecimal(), not isdigit(): isdigit() also accepts superscripts and
     circled digits, which int() refuses — a custom rule matching "²" made
