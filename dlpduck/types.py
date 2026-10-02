@@ -73,6 +73,7 @@ class DocumentText:
     ocr_page_count: int = 0
     degraded: bool = False  # any page failed extraction -> fail closed
     failed_page_count: int = 0  # pages that raised, distinct from valid empty OCR
+    blank_page_count: int = 0  # pages OCR read nothing from AND carry no ink — not degraded
 
     def add_line(self, line: TextLine) -> None:
         self.lines.append(line)

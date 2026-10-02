@@ -66,7 +66,7 @@ documents under new rules, approve releases, and purge retained content.
 ## How it works
 
 1. The watcher waits until a PDF (or a TIFF/JPEG/PNG scan, converted losslessly to PDF) stops changing, then moves it into staging.
-2. Each page uses native text when suitable and OCR when it is sparse or contains images.
+2. Each page uses native text when suitable and OCR when it is sparse; on a page with both, native text is kept and OCR adds only what is inside the images. A measurably blank page is not treated as a failed one.
 3. Rules inspect lines or the complete document and mask every recorded match.
 4. Enrichment plugins can add routing context before the final decision.
 5. Clean documents enter the archive; matches and incomplete extraction enter quarantine.
@@ -241,6 +241,7 @@ limits:
 extraction:
   dpi: 150                      # OCR raster resolution
   native_min_chars: 20          # per page: below this, the page goes to OCR
+  blank_page_max_ink: 0.0001    # an empty page this clean is blank, not degraded
   isolate_worker: true          # contain parser/OCR hangs in a child process
   timeout_seconds: 120          # whole-document extraction budget
   worker_memory_mb: 4096        # address-space cap for the isolated worker

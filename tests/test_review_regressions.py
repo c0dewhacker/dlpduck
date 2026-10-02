@@ -261,7 +261,12 @@ def test_nonpositive_processing_limits_rejected(pipeline, section, field, value)
 
 def test_empty_page_in_multpage_document_is_incomplete(monkeypatch):
     extractor = LineExtractor()
-    calls = iter([(["ordinary native text"], "native", None), ([], "ocr", None)])
+    from dlpduck.extract import _PageResult, _Row
+
+    calls = iter([
+        _PageResult([_Row("ordinary native text", "native", None)], "native", None),
+        _PageResult([], "ocr", None),  # OCR read nothing and the page is not blank
+    ])
     monkeypatch.setattr(extractor, "_page_rows", lambda _: next(calls))
     assert extractor.extract(blank_pdf([(595, 842), (595, 842)])).degraded
 
@@ -271,14 +276,16 @@ def test_native_heading_does_not_skip_image_ocr(monkeypatch):
     page = Mock()
     text_page = page.get_textpage.return_value
     text_page.get_text_bounded.return_value = "Long native heading above an image"
+    text_page.count_rects.return_value = 0  # no positioned runs: OCR the whole page
+    page.get_size.return_value = (595, 842)
     page.get_rotation.return_value = 0
     page.get_objects.return_value = [Mock()]
     bitmap = page.render.return_value
     bitmap.to_numpy.return_value = Mock()
     monkeypatch.setattr(extractor, "_safe_dpi", lambda _: 150)
     extractor._ocr = Mock(return_value=([([[0, 0], [100, 0], [100, 20], [0, 20]], "SECRET", .99)], None))
-    rows, source, _ = extractor._page_rows(page)
-    assert "SECRET" in rows and source == "ocr"
+    result = extractor._page_rows(page)
+    assert "SECRET" in [row.text for row in result.rows] and result.kind == "ocr"
     extractor._ocr.assert_called_once()
 
 

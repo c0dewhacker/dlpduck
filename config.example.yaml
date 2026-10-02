@@ -50,6 +50,12 @@ limits:
 extraction:
   dpi: 150
   native_min_chars: 20             # per page
+  # A page OCR reads nothing from fails closed (degraded -> quarantine)
+  # unless it is measurably blank: at most this fraction of it dark. Lets
+  # the blank backs of duplex scans through; 0 treats every empty page as
+  # degraded. Keep it tight — a looser value can let a page with a short,
+  # unread value through as "blank".
+  blank_page_max_ink: 0.0001
   # Extraction runs in a disposable child process, so a parser or OCR
   # model that wedges on a hostile PDF cannot stall ingestion forever —
   # the child is killed at the timeout and the job fails closed. Set

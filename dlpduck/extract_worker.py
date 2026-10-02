@@ -109,11 +109,13 @@ def extract_isolated(
     *,
     max_pages: int | None = None,
     memory_mb: int | None = None,
+    blank_max_ink: float | None = None,
 ) -> DocumentText:
     try:
         raw = run_isolated(
             "extract", pdf_bytes,
-            {"dpi": dpi, "min_chars": min_chars, "max_pages": max_pages},
+            {"dpi": dpi, "min_chars": min_chars, "max_pages": max_pages,
+             "blank_max_ink": blank_max_ink},
             timeout=timeout, memory_mb=memory_mb,
         )
     except TimeoutError:
@@ -183,7 +185,11 @@ def main() -> None:
     if task == "extract":
         from dlpduck.extract import LineExtractor
 
-        extractor = LineExtractor(dpi=int(args["dpi"]), max_pages=args.get("max_pages"))
+        extractor = LineExtractor(
+            dpi=int(args["dpi"]),
+            max_pages=args.get("max_pages"),
+            blank_max_ink=args.get("blank_max_ink"),
+        )
         extractor.NATIVE_MIN_CHARS = int(args["min_chars"])
         try:
             doc = extractor.extract(payload)

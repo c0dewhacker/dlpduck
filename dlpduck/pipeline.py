@@ -150,6 +150,7 @@ class Pipeline:
             timeout=config.extraction.timeout_seconds,
             max_pages=config.limits.max_pages,
             memory_mb=config.extraction.worker_memory_mb,
+            blank_max_ink=config.extraction.blank_page_max_ink,
         )
         self.extractor.NATIVE_MIN_CHARS = config.extraction.native_min_chars
         self.engine = DLPEngine(

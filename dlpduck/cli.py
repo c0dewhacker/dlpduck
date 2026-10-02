@@ -110,6 +110,9 @@ def scan(pdf_path: str, config_path: str) -> None:
         dpi=config.extraction.dpi,
         isolate=config.extraction.isolate_worker,
         timeout=config.extraction.timeout_seconds,
+        max_pages=config.limits.max_pages,
+        memory_mb=config.extraction.worker_memory_mb,
+        blank_max_ink=config.extraction.blank_page_max_ink,
     )
     extractor.NATIVE_MIN_CHARS = config.extraction.native_min_chars
     engine = DLPEngine(
@@ -167,6 +170,9 @@ def test_rules(corpus: str, config_path: str, rule_id: str | None) -> None:
         dpi=config.extraction.dpi,
         isolate=config.extraction.isolate_worker,
         timeout=config.extraction.timeout_seconds,
+        max_pages=config.limits.max_pages,
+        memory_mb=config.extraction.worker_memory_mb,
+        blank_max_ink=config.extraction.blank_page_max_ink,
     )
     extractor.NATIVE_MIN_CHARS = config.extraction.native_min_chars
     engine = DLPEngine(

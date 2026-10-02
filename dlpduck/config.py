@@ -76,6 +76,12 @@ class ExtractionConfig(BaseModel):
     # 4096 leaves OCR comfortable headroom; null removes the cap.
     worker_memory_mb: int | None = Field(default=4096, ge=512)
     native_min_chars: int = Field(default=20, ge=0)  # evaluated per page
+    # A page OCR reads nothing from is degraded (and so quarantines the
+    # document) unless at most this fraction of it is dark — i.e. it really
+    # is blank, like the back of a duplex scan. Tight by default: about 200
+    # pixels on an A4 page at 150 dpi, less ink than a nine-digit number.
+    # 0 treats every empty page as degraded.
+    blank_page_max_ink: float = Field(default=0.0001, ge=0, le=0.05)
 
 
 class DlpConfig(BaseModel):
