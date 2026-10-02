@@ -607,14 +607,14 @@ class TestCrashRecoveryHandlesCompanions:
     """resume_staged re-reads whatever was staged alongside the PDF, so it
     needs the same bounds and the same tolerance as the claim path."""
 
-    def _staged_job(self, tmp_path, config, companion_text: str, suffix=".txt"):
+    def _staged_job(self, tmp_path, config, companion_text: str, name="companion.meta"):
         pipeline = Pipeline(config)
         staging = config.destination.work_dir / "_processing"
         pdf = _pdf(tmp_path / "doc.pdf", ["ordinary content"])
         job_dir = staging / content_job_id(pdf.read_bytes())
         job_dir.mkdir(parents=True)
         (job_dir / "document.pdf").write_bytes(pdf.read_bytes())
-        (job_dir / f"meta{suffix}").write_text(companion_text)
+        (job_dir / name).write_text(companion_text)
         return pipeline, staging
 
     def test_a_staged_companion_is_read_back(self, tmp_path, monkeypatch):
@@ -666,9 +666,91 @@ class TestCrashRecoveryHandlesCompanions:
                 },
             )
         )
-        pipeline, staging = self._staged_job(tmp_path, config, "{not json", suffix=".json")
+        pipeline, staging = self._staged_job(tmp_path, config, "{not json")
 
         [ctx] = pipeline.resume_staged(staging)
 
         assert ctx.disposition == "archive"
         assert ctx.metadata == {}
+
+
+class TestACompanionCannotImpersonateStagingFiles:
+    """A companion used to be staged under the sender's own filename,
+    beside the job's manifest.json and (once resolved) resolution.json. A
+    drop-folder writer could therefore overwrite the manifest or plant a
+    resolution — the second of which had the never-scanned document
+    skipped by every sweep and filed straight into the resolved queue."""
+
+    def _json_config(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("DLPDUCK_HMAC_KEY", "test-key-not-for-production")
+        return Config.model_validate(
+            _config_dict(
+                tmp_path,
+                source={
+                    "name": "t", "path": str(tmp_path / "drops"), "metadata_format": "json",
+                    "metadata_suffix": ".json", "metadata_fields": ["device_id"],
+                },
+            )
+        )
+
+    @pytest.mark.parametrize("stem", ["resolution", "manifest", "companion"])
+    def test_a_reserved_name_is_still_scanned_and_committed(self, tmp_path, monkeypatch, stem):
+        config = self._json_config(tmp_path, monkeypatch)
+        pipeline = Pipeline(config)
+        staging = config.destination.work_dir / "_processing"
+        pdf = _pdf(tmp_path / "drops" / f"{stem}.pdf", ["Card 4111 1111 1111 1111"])
+        companion = tmp_path / "drops" / f"{stem}.json"
+        companion.write_text(json.dumps({"device_id": "MFP-1", "reason": "x", "actor": "y"}))
+
+        staged = pipeline.stage(pdf, companion, staging)
+        [ctx] = pipeline.resume_staged(staging)
+
+        assert ctx.job_id == staged.job_id
+        assert ctx.disposition == "quarantine"
+        assert ctx.metadata == {"device_id": "MFP-1"}
+        assert not (staging / ctx.job_id).exists()
+
+    def test_the_original_companion_name_is_recorded(self, tmp_path, monkeypatch):
+        config = self._json_config(tmp_path, monkeypatch)
+        pipeline = Pipeline(config)
+        staging = config.destination.work_dir / "_processing"
+        pdf = _pdf(tmp_path / "drops" / "scan.pdf", ["ordinary content"])
+        companion = tmp_path / "drops" / "scan.json"
+        companion.write_text(json.dumps({"device_id": "MFP-1"}))
+
+        ctx = pipeline.stage(pdf, companion, staging)
+
+        manifest = json.loads((staging / ctx.job_id / "manifest.json").read_text())
+        assert manifest["companion"] == "scan.json"
+        assert sorted(p.name for p in (staging / ctx.job_id).iterdir()) == [
+            "companion.meta", "document.pdf", "manifest.json",
+        ]
+
+    def test_a_legacy_staged_companion_is_preferred_over_the_manifest(self, tmp_path, monkeypatch):
+        config = self._json_config(tmp_path, monkeypatch)
+        pipeline = Pipeline(config)
+        staging = config.destination.work_dir / "_processing"
+        pdf = _pdf(tmp_path / "doc.pdf", ["ordinary content"])
+        job_dir = staging / content_job_id(pdf.read_bytes())
+        job_dir.mkdir(parents=True)
+        (job_dir / "document.pdf").write_bytes(pdf.read_bytes())
+        (job_dir / "manifest.json").write_text(json.dumps({"steps": [], "device_id": "WRONG"}))
+        (job_dir / "scan.json").write_text(json.dumps({"device_id": "MFP-7"}))
+
+        [ctx] = pipeline.resume_staged(staging)
+
+        assert ctx.metadata == {"device_id": "MFP-7"}
+
+    def test_a_planted_legacy_resolution_does_not_hide_the_job(self, tmp_path, monkeypatch):
+        config = self._json_config(tmp_path, monkeypatch)
+        pipeline = Pipeline(config)
+        staging = config.destination.work_dir / "_processing"
+        pdf = _pdf(tmp_path / "doc.pdf", ["ordinary content"])
+        job_dir = staging / content_job_id(pdf.read_bytes())
+        job_dir.mkdir(parents=True)
+        (job_dir / "document.pdf").write_bytes(pdf.read_bytes())
+        (job_dir / "resolution.json").write_text(json.dumps({"device_id": "MFP-7"}))
+
+        [ctx] = pipeline.resume_staged(staging)
+
+        assert ctx.disposition == "archive"

@@ -11,6 +11,7 @@ from pathlib import Path
 from dlpduck.content import validate_job_id
 from dlpduck.durability import copy_durably, write_atomically
 from dlpduck.operations import LockContended, serialized
+from dlpduck.pipeline import is_resolved
 from dlpduck.types import DocumentTooLarge, UnsafeSourceFile
 
 logger = logging.getLogger("dlpduck.failures")
@@ -31,7 +32,7 @@ class FailureQueue:
                     validate_job_id(folder.name)
                 except ValueError:
                     continue
-                done = (folder / "resolution.json").is_file()
+                done = is_resolved(folder)
                 if done != resolved:
                     continue
                 path = folder / ("metadata.json" if kind == "failed" else "manifest.json")

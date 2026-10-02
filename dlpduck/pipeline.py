@@ -56,17 +56,44 @@ def content_job_id(pdf_bytes: bytes) -> str:
     return hashlib.blake2b(pdf_bytes, digest_size=16).hexdigest()
 
 
-def _read_bounded(path: Path, limit: int) -> bytes | None:
-    """Read at most `limit` bytes, or None if the file is bigger. Used for
-    companion metadata, which arrives from the same drop folder as the PDF
-    and so gets the same "bounded by what is actually read" treatment."""
-    data, _ = _read_bounded_with_stat(path, limit)
-    return data
+# Names this pipeline writes into a job's staging directory itself. A
+# sender's companion file is never staged under its own name, so none of
+# these can be overwritten from the drop folder.
+STAGED_COMPANION = "companion.meta"
+STAGED_REJECTED_COMPANION = "companion.rejected-symlink"
+_RESERVED_STAGING_NAMES = frozenset(
+    {"document.pdf", "manifest.json", "resolution.json", STAGED_COMPANION,
+     STAGED_REJECTED_COMPANION}
+)
+
+
+def is_resolved(job_dir: Path) -> bool:
+    """Has an operator marked this staged or failed job resolved?
+
+    Only a record FailureQueue.resolve() actually wrote counts. Before
+    companions were staged under a fixed name, a sender could drop
+    `resolution.pdf` with a `resolution.json` beside it and have the
+    never-scanned document skipped by every sweep and filed straight into
+    the resolved queue; a directory staged by that release must not keep
+    that effect after an upgrade.
+    """
+    path = job_dir / "resolution.json"
+    if not path.is_file() or path.is_symlink():
+        return False
+    try:
+        record = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return False
+    return isinstance(record, dict) and {"reason", "actor"} <= record.keys()
 
 
 def _read_bounded_with_stat(
     path: Path, limit: int
 ) -> tuple[bytes | None, os.stat_result]:
+    """Read at most `limit` bytes without following a symlink. Returns
+    (None, stat) if the file is bigger than `limit`: companion metadata
+    arrives from the same drop folder as the PDF and so gets the same
+    "bounded by what is actually read" treatment."""
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
         fd = os.open(path, flags)
@@ -303,10 +330,7 @@ class Pipeline:
         # file, when one exists, wins on any key they both set.
         raw_metadata: dict = extract_pdf_metadata(pdf_bytes)
         if metadata_path is not None and metadata_path.is_symlink():
-            shutil.move(
-                str(metadata_path),
-                str(staging_dir / f"{metadata_path.name}.rejected-symlink"),
-            )
+            shutil.move(str(metadata_path), str(staging_dir / STAGED_REJECTED_COMPANION))
             self.audit.append(
                 "metadata.rejected",
                 job_id=job_id,
@@ -318,7 +342,14 @@ class Pipeline:
                 metadata_path, self.config.limits.max_metadata_bytes
             )
             if content is not None:
-                write_bytes_durably(staging_dir / metadata_path.name, content)
+                # Under a fixed name, never the sender's. The staging
+                # directory also holds this job's own manifest.json and,
+                # once an operator acts, resolution.json — a companion
+                # called either of those would overwrite the manifest (and
+                # wedge the job) or mark a never-scanned document resolved.
+                write_bytes_durably(staging_dir / STAGED_COMPANION, content)
+                manifest["companion"] = metadata_path.name
+                write_atomically(staging_dir / "manifest.json", json.dumps(manifest))
             _unlink_if_same(metadata_path, opened_metadata)
             if content is None:
                 logger.warning(
@@ -844,7 +875,7 @@ class Pipeline:
         for job_dir in sorted(staging_root.iterdir()):
             if job_id is not None and job_dir.name != job_id:
                 continue
-            if (job_dir / "resolution.json").is_file():
+            if is_resolved(job_dir):
                 continue
             staged_pdf = job_dir / "document.pdf"
             if not job_dir.is_dir() or not staged_pdf.is_file():
@@ -862,6 +893,29 @@ class Pipeline:
             if ctx is not None:
                 resumed.append(ctx)
         return resumed
+
+    def _staged_companion(self, job_dir: Path) -> Path | None:
+        """The companion staged beside this job's PDF, if any.
+
+        Current claims always write it as STAGED_COMPANION. A directory
+        staged by an older release holds it under the sender's own
+        filename instead, so that is still looked for — but never one of
+        the names this pipeline writes itself, and in a fixed order rather
+        than whatever order the filesystem lists entries in.
+        """
+        fixed = job_dir / STAGED_COMPANION
+        if fixed.is_file() and not fixed.is_symlink():
+            return fixed
+        suffix = self.config.source.metadata_suffix.lower()
+        legacy = sorted(
+            p
+            for p in job_dir.iterdir()
+            if p.name.lower().endswith(suffix)
+            and p.name not in _RESERVED_STAGING_NAMES
+            and p.is_file()
+            and not p.is_symlink()
+        )
+        return legacy[0] if legacy else None
 
     def _resume_one(self, job_dir: Path, staged_pdf: Path) -> JobContext | None:
         logger.debug("resume_staged: found staged job %s", job_dir.name)
@@ -889,17 +943,13 @@ class Pipeline:
                 manifest.get("filename", "document.pdf"),
                 manifest.get("source_name", self.config.source.name),
             )
-        meta_files = [
-            p
-            for p in job_dir.iterdir()
-            if p.name.endswith(self.config.source.metadata_suffix)
-        ]
-        if meta_files:
-            content = _read_bounded(meta_files[0], self.config.limits.max_metadata_bytes)
+        companion = self._staged_companion(job_dir)
+        if companion is not None:
+            content, _ = _read_bounded_with_stat(companion, self.config.limits.max_metadata_bytes)
             if content is None:
                 logger.warning(
                     "companion %s exceeds limits.max_metadata_bytes — ignoring it",
-                    meta_files[0].name,
+                    companion.name,
                 )
             else:
                 try:
