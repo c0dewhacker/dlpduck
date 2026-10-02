@@ -792,3 +792,39 @@ class TestClaimAndExtractionAreSeparatelyDrivable:
         assert len(set(processed)) == job_count, "not every staged job was picked up"
         for job_id in processed:
             assert latest_index_rows(pipeline.index_root, job_ids=[job_id])[0]["disposition"] == "archive"
+
+
+class TestTheLockRegistryDoesNotGrowForever:
+    """job_lock() takes one key per job id; every key ever seen used to
+    stay in the registry for the life of the daemon."""
+
+    def test_released_keys_are_dropped(self, tmp_path):
+        from dlpduck import operations
+
+        before = len(operations._LOCAL_LOCKS)
+        for n in range(50):
+            with operations.operation_lock(tmp_path / f"job{n}"):
+                pass
+        assert len(operations._LOCAL_LOCKS) == before
+
+    def test_a_contended_attempt_does_not_leak_either(self, tmp_path):
+        import threading
+
+        from dlpduck import operations
+
+        held, release = threading.Event(), threading.Event()
+
+        def holder():
+            with operations.operation_lock(tmp_path / "busy"):
+                held.set()
+                release.wait(5)
+
+        thread = threading.Thread(target=holder)
+        thread.start()
+        held.wait(5)
+        with pytest.raises(operations.LockContended):
+            with operations.operation_lock(tmp_path / "busy", blocking=False):
+                pass
+        release.set()
+        thread.join()
+        assert str((tmp_path / "busy").resolve()) not in operations._LOCAL_LOCKS

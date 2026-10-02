@@ -451,10 +451,14 @@ class AuditLog:
                         return path, line_no, event
         raise KeyError(f"no audit event with seq {seq}")
 
-    def events_for_job(self, job_id: str) -> list[dict[str, Any]]:
+    def events_for_job(self, job_id: str, since: date | None = None) -> list[dict[str, Any]]:
         """Every event mentioning this job, oldest first — the console's
-        job-detail timeline. A linear scan of every partition; fine at
-        MFP volumes, the first thing to revisit if this ever isn't.
+        job-detail timeline. A linear scan of every partition from `since`
+        onward (all of them when None).
+
+        Callers that know when the job first arrived pass that date: no
+        event can name a job before its first receipt, and the partitions
+        before it are, for an old trail, nearly all of it.
         """
         # A job's events can be spread across any partition — a purge or a
         # reassessment lands years after ingest — so this genuinely has to
@@ -466,7 +470,10 @@ class AuditLog:
         # cannot possibly match.
         needle = f'"{job_id}"'
         out: list[dict[str, Any]] = []
+        floor = f"dt={since.isoformat()}" if since is not None else ""
         for path in self._partition_files():
+            if path.parent.name < floor:
+                continue
             with open(path, encoding="utf-8") as f:
                 for line_no, raw in enumerate(f, start=1):
                     if needle not in raw:

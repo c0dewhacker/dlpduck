@@ -600,6 +600,26 @@ class Pipeline:
         }
         self._checkpoint(ctx, manifest, "assessed")
 
+    def _completion_already_audited(self, ctx: JobContext, manifest: dict) -> bool:
+        """Did a previous attempt append this receipt's job.completed and
+        crash before checkpointing it?
+
+        Only answerable by reading the trail, which used to happen on every
+        commit — a scan of the whole audit history per document, growing
+        without bound. Now the manifest records `audit_started` just before
+        the append, so the trail is read only when that marker says an
+        append may have happened, and then only from the receipt's own day.
+        """
+        if "audit_started" not in manifest["steps"] or not manifest.get("receipt_id"):
+            return False
+        since = None
+        if manifest.get("received_at"):
+            since = datetime.fromisoformat(manifest["received_at"]).date()
+        return any(
+            e.get("receipt_id") == manifest["receipt_id"] and e.get("event") == "job.completed"
+            for e in self.audit.events_for_job(ctx.job_id, since=since)
+        )
+
     @serialized
     def commit(self, ctx: JobContext) -> Path:
         """1) copy the PDF, 2) append+fsync the audit event, 3) write the
@@ -631,9 +651,8 @@ class Pipeline:
             copy_durably(ctx.pdf_path, dest_path)
             self._checkpoint(ctx, manifest, "pdf")
 
-        already_audited = any(e.get("receipt_id") == manifest.get("receipt_id") and e.get("event") == "job.completed"
-                              for e in self.audit.events_for_job(ctx.job_id)) if manifest.get("receipt_id") else False
-        if "audit" not in manifest["steps"] and not already_audited:
+        if "audit" not in manifest["steps"] and not self._completion_already_audited(ctx, manifest):
+            self._checkpoint(ctx, manifest, "audit_started")
             self.audit.append(
                 "job.completed",
                 receipt_id=manifest.get("receipt_id"),

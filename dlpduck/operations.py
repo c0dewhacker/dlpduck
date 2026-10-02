@@ -23,7 +23,11 @@ from dlpduck.durability import FileAlreadyExists, atomic_write, write_atomically
 
 logger = logging.getLogger("dlpduck.operations")
 
-_LOCAL_LOCKS: dict[str, threading.RLock] = {}
+# key -> [lock, number of callers currently holding or waiting on it]. The
+# entry is dropped when that count returns to zero: job_lock() takes one
+# key per job id, and keeping every one ever seen grew this dict for the
+# life of the daemon — one lock per document ingested.
+_LOCAL_LOCKS: dict[str, list] = {}
 _REGISTRY_LOCK = threading.Lock()
 _HELD = threading.local()
 
@@ -40,9 +44,15 @@ def operation_lock(root: Path, *, blocking: bool = True):
     root.mkdir(parents=True, exist_ok=True)
     key = str(root.resolve())
     with _REGISTRY_LOCK:
-        mutex = _LOCAL_LOCKS.setdefault(key, threading.RLock())
-    if not mutex.acquire(blocking=blocking):
-        raise LockContended(key)
+        entry = _LOCAL_LOCKS.setdefault(key, [threading.RLock(), 0])
+        entry[1] += 1
+    mutex = entry[0]
+    try:
+        if not mutex.acquire(blocking=blocking):
+            raise LockContended(key)
+    except BaseException:
+        _release_entry(key)
+        raise
     try:
         held: set[str] = getattr(_HELD, "roots", set())
         if key in held:
@@ -65,6 +75,17 @@ def operation_lock(root: Path, *, blocking: bool = True):
                 fcntl.flock(lock, fcntl.LOCK_UN)
     finally:
         mutex.release()
+        _release_entry(key)
+
+
+def _release_entry(key: str) -> None:
+    with _REGISTRY_LOCK:
+        entry = _LOCAL_LOCKS.get(key)
+        if entry is None:
+            return
+        entry[1] -= 1
+        if entry[1] <= 0:
+            del _LOCAL_LOCKS[key]
 
 
 def serialized(method):

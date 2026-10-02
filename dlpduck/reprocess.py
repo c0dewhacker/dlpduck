@@ -649,9 +649,19 @@ class Reprocessor:
         payload = {"prior_path": prior["archive_path"], "row": row,
                    "text": asdict(text) if text is not None else None, "event": event}
         write_atomically(path, json.dumps(payload, default=lambda v: v.isoformat()))
-        self._apply_transition(path, payload)
+        self._apply_transition(path, payload, recovering=False)
 
-    def _apply_transition(self, path, payload):
+    def _apply_transition(self, path, payload, *, recovering: bool = True):
+        """Carry out a recorded transition. Every step is safe to repeat,
+        which is what lets a crash anywhere in here be finished later.
+
+        The audit event is the one step that cannot simply be re-run, so
+        whether it already happened is checked against the trail — but
+        only when `recovering` a transition an earlier process left behind.
+        Applied straight after being written, nothing can have appended it
+        yet, and checking meant scanning the whole audit history for every
+        reassessment and release.
+        """
         row = payload["row"]
         for key in ("received_at", "assessed_at"):
             if isinstance(row[key], str):
@@ -668,8 +678,16 @@ class Reprocessor:
             write_row(self.index_root, row, dt=row["received_at"].date(), job_id=row["job_id"],
                       assessment_seq=row["assessment_seq"], exclusive=True)
         event = payload["event"]
-        if not any(e.get("to_assessment_seq") == row["assessment_seq"] and e.get("event") == event["event"]
-                   for e in self.audit.events_for_job(row["job_id"])):
+        already = recovering and any(
+            e.get("to_assessment_seq") == row["assessment_seq"] and e.get("event") == event["event"]
+            for e in self.audit.events_for_job(
+                row["job_id"],
+                # The transition file is written before the event can be,
+                # so nothing older than it needs reading.
+                since=datetime.fromtimestamp(path.stat().st_mtime, UTC).date(),
+            )
+        )
+        if not already:
             self.audit.append(event["event"], **{key: value for key, value in event.items() if key != "event"})
         path.unlink()
 

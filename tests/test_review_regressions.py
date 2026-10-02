@@ -320,3 +320,45 @@ def test_isolated_worker_timeout_is_reported(monkeypatch):
 def test_isolated_worker_reads_real_pdf():
     result = extract_isolated(make_pdf([["Native document through an isolated worker"]]), 150, 20, 20)
     assert "isolated worker" in result.full_text
+
+
+def test_routine_commits_and_reassessments_do_not_scan_the_audit_trail(pipeline, monkeypatch):
+    """Checking the trail for an already-appended event used to happen on
+    every commit and every transition — a read of the whole history per
+    document, growing without bound."""
+    monkeypatch.setattr(
+        pipeline.audit, "events_for_job",
+        Mock(side_effect=AssertionError("scanned the audit trail on the happy path")),
+    )
+    ctx = ingest(pipeline)
+    prior = latest_index_rows(pipeline.index_root)[0]
+    Reprocessor(pipeline)._write_assessment(prior, [], "archive", "changed", document("New text"))
+    assert ctx.disposition
+
+
+def test_a_crash_between_the_completion_event_and_its_checkpoint_is_not_duplicated(
+    pipeline, monkeypatch
+):
+    import dlpduck.pipeline as module
+
+    staging = pipeline.config.destination.work_dir / "_processing"
+    source = pipeline.config.source.path / "doc.pdf"
+    source.write_bytes(make_pdf([["An ordinary document"]]))
+    ctx = pipeline.stage(source, None, staging)
+
+    real_checkpoint = module.Pipeline._checkpoint
+
+    def crash_after_audit(self, job, manifest, step):
+        if step == "audit":
+            raise OSError("power cut")
+        return real_checkpoint(self, job, manifest, step)
+
+    monkeypatch.setattr(module.Pipeline, "_checkpoint", crash_after_audit)
+    with pytest.raises(OSError):
+        pipeline.resume_staged(staging)
+    monkeypatch.setattr(module.Pipeline, "_checkpoint", real_checkpoint)
+
+    pipeline.resume_staged(staging)
+
+    completed = [e for e in pipeline.audit.events_for_job(ctx.job_id) if e["event"] == "job.completed"]
+    assert len(completed) == 1

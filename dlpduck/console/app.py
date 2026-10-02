@@ -95,6 +95,22 @@ def _rederive_hit_value(doc, hit: dict[str, Any], rules) -> str | None:
     return candidate
 
 
+def _first_seen(job: dict[str, Any], receipts: list[dict[str, Any]]) -> date | None:
+    """The earliest UTC date this job's content arrived, for bounding the
+    timeline's audit scan. Receipts cover every arrival, including failed
+    attempts that predate the indexed one; with none on record (a job from
+    before receipts existed) the whole trail is read, as before."""
+    if not receipts:
+        return None
+    dates = [job["received_at"].date()]
+    for receipt in receipts:
+        try:
+            dates.append(datetime.fromisoformat(receipt["received_at"]).astimezone(UTC).date())
+        except (KeyError, TypeError, ValueError):
+            return None
+    return min(dates)
+
+
 def _parse_date_param(value: str, field: str) -> date | None:
     """Date filters arrive as raw query strings. They normally come from an
     <input type="date">, but a bookmarked, hand-edited or truncated URL is
@@ -318,7 +334,11 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
         can_release = has_permission(roles, "quarantine.release")
         pdf_permission_needed = _pdf_permission_for(job)
         can_view_pdf = has_permission(roles, pdf_permission_needed)
-        audit_events = pipeline.audit.events_for_job(job_id) if can_see_audit else []
+        receipts = pipeline.operations.receipts(job_id)
+        audit_events = (
+            pipeline.audit.events_for_job(job_id, since=_first_seen(job, receipts))
+            if can_see_audit else []
+        )
         # Purge never touches the index row because it proves the job
         # happened, so "was this purged" isn't a stored
         # field anywhere; it's derived the same way the PDF route already
@@ -349,7 +369,6 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
         can_purge = may_purge and reprocessable  # nothing left once both are gone
         can_reprocess_preview = may_reprocess and reprocessable
         can_reprocess_commit = has_permission(roles, "jobs.reprocess.commit") and reprocessable
-        receipts = pipeline.operations.receipts(job_id)
         for receipt in receipts:
             receipt["metadata"] = _json_or_empty(receipt.get("metadata"))
 

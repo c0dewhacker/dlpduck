@@ -576,7 +576,8 @@ def compact_index(config_path: str, do_commit: bool) -> None:
     completed days; today's partition is left alone because it is still
     being written.
 
-    Safe to run against a live system, and safe to interrupt.
+    Safe to run against a live system (each partition is merged under the
+    same write lock ingest and reprocessing take), and safe to interrupt.
     """
     config = _load(config_path)
     plans = plan_compaction(config.destination.work_dir / "index")
@@ -600,7 +601,7 @@ def compact_index(config_path: str, do_commit: bool) -> None:
     reclaimed = 0
     with click.progressbar(plans, label="compacting") as bar:
         for plan in bar:
-            reclaimed += compact_partition(plan)
+            reclaimed += compact_partition(plan, lock_root=config.destination.work_dir)
     click.secho(
         f"merged {total_files} file(s) into {len(plans)}, reclaimed {reclaimed / 1e6:.1f} MB",
         fg="green",
