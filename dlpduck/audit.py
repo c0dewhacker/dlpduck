@@ -353,7 +353,11 @@ class AuditLog:
             partition = self.root / f"dt={now.date().isoformat()}"
             partition.mkdir(parents=True, exist_ok=True)
             path = partition / "events.jsonl"
-            with open(path, "a", encoding="utf-8") as f:
+            # Created owner-only whatever the process umask: the trail
+            # holds actor names, filenames and (in plain mode) search
+            # terms, and has no purge path.
+            fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+            with os.fdopen(fd, "a", encoding="utf-8") as f:
                 f.write(_canonical(event) + "\n")
                 f.flush()
                 os.fsync(f.fileno())

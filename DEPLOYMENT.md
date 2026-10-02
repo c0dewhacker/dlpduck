@@ -232,7 +232,15 @@ configuration:
       bind: 0.0.0.0:8080
       session_secret_env: DLPDUCK_SESSION_SECRET
       session_cookie_secure: true
+      # The ingress controller's pod range, or "*" if a NetworkPolicy
+      # (networkPolicy.enabled) admits traffic only from the controller.
+      forwarded_allow_ips: "10.42.0.0/16"
 ```
+
+`forwarded_allow_ips` matters behind any ingress: without it every request
+appears to come from the controller, so the login lockout — keyed on client
+address as well as username — locks out everyone at once, and the OIDC
+callback is built as `http://` behind TLS termination.
 
 Set `issuerType` to `Issuer` for a namespaced issuer. Limit access at the
 ingress, identity provider and network layer; the console contains sensitive

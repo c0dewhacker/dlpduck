@@ -636,3 +636,43 @@ class TestCliErrorPathsExitCleanly:
         result = runner.invoke(main, ["validate-config", "--config", str(config)])
 
         assert result.exit_code == 0, result.output
+
+
+class TestConsoleRunTrustsConfiguredProxies:
+    def test_forwarded_allow_ips_reaches_uvicorn(self, env, runner, monkeypatch):
+        import uvicorn
+
+        monkeypatch.setenv("DLPDUCK_SESSION_SECRET", "test-session-secret")
+        monkeypatch.setenv("DLPDUCK__CONSOLE__FORWARDED_ALLOW_IPS", "10.42.0.0/16")
+        seen = {}
+        monkeypatch.setattr(uvicorn, "run", lambda app, **kwargs: seen.update(kwargs))
+
+        result = runner.invoke(main, ["console", "run", "--config", str(env["config"])])
+
+        assert result.exit_code == 0, result.output
+        assert seen["proxy_headers"] is True
+        assert seen["forwarded_allow_ips"] == "10.42.0.0/16"
+
+
+class TestEveryCommandAppliesTheUmask:
+    """Only `run` and `console run` used to. From a shell with umask 0022,
+    `dlpduck search` created the day's audit file world-readable."""
+
+    def test_search_writes_owner_only_files(self, env, runner):
+        import os
+        import stat
+
+        _ingest(env, runner)
+        shutil.rmtree(env["tmp"] / "work" / "audit")  # only what search itself creates
+        previous = os.umask(0o022)
+        try:
+            result = runner.invoke(main, ["search", "memo", "--config", str(env["config"])])
+        finally:
+            os.umask(previous)
+
+        assert result.exit_code == 0, result.output
+        for path in (env["tmp"] / "work" / "audit").rglob("*"):
+            if path.name.startswith("."):
+                continue
+            mode = stat.S_IMODE(path.stat().st_mode)
+            assert mode & 0o077 == 0, f"{path} is {oct(mode)}"

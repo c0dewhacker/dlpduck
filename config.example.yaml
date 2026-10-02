@@ -129,6 +129,10 @@ console:
   # document. Repeated searches still correlate. Select plain only where
   # recording the exact operator query is an explicit policy choice.
   audit_search_terms: hashed     # hashed | plain
+  # Proxies whose X-Forwarded-For/-Proto are believed (addresses, CIDRs or
+  # "*"). Behind an ingress, set this or every user shares the proxy's
+  # address for login lockouts. Unset trusts 127.0.0.1 only.
+  forwarded_allow_ips: null
   auth:
     # Failed local logins before that username, or that client address, is
     # refused until the lockout expires. This bounds password guessing, but

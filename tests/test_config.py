@@ -404,6 +404,15 @@ class TestConfigWarnings:
             config = self._config(tmp_path, console={"bind": bind})
             assert config_warnings(config) == [], bind
 
+    def test_a_non_loopback_bind_without_trusted_proxies_is_flagged(self, tmp_path):
+        config = self._config(tmp_path, console={"bind": "0.0.0.0:8080",
+                                                 "session_cookie_secure": True})
+        assert any("forwarded_allow_ips" in w for w in config_warnings(config))
+        config = self._config(tmp_path, console={"bind": "0.0.0.0:8080",
+                                                 "session_cookie_secure": True,
+                                                 "forwarded_allow_ips": "10.0.0.0/8"})
+        assert config_warnings(config) == []
+
     def test_disabling_chaining_is_flagged(self, tmp_path):
         config = self._config(tmp_path, audit={"integrity": "none"})
         assert any("verify-audit" in w for w in config_warnings(config))

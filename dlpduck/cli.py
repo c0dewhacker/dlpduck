@@ -51,6 +51,22 @@ def _parse_date_option(value: str | None, flag: str) -> date | None:
         sys.exit(1)
 
 
+def _load(config_path: str):
+    """Load config and apply its umask before the command writes anything.
+
+    Only `run` and `console run` used to do this, but nearly every command
+    writes: `search` appends to the audit trail (creating the day's file if
+    it is the first event), `reprocess --commit` and `release` move PDFs and
+    write index rows, `purge-content`, `retention --apply`, `reindex` and
+    `redact-audit` all write too. Run from a shell with the usual 0022, each
+    of those created world-readable files in stores the config says are
+    owner-only.
+    """
+    config = load_config(config_path)
+    config.apply_umask()
+    return config
+
+
 def _document_bytes(path: Path, config) -> bytes:
     """A document as the pipeline would store it: PDF bytes, with a
     scanner image converted first (in the isolated worker when extraction
@@ -105,7 +121,7 @@ def validate_config_cmd(config_path: str) -> None:
 def scan(pdf_path: str, config_path: str) -> None:
     """Dry run one document (PDF, or a TIFF/JPEG/PNG scan): print extracted lines with page/line indices
     and every hit. Nothing is written."""
-    config = load_config(config_path)
+    config = _load(config_path)
     extractor = LineExtractor(
         dpi=config.extraction.dpi,
         isolate=config.extraction.isolate_worker,
@@ -165,7 +181,7 @@ def scan(pdf_path: str, config_path: str) -> None:
 def test_rules(corpus: str, config_path: str, rule_id: str | None) -> None:
     """Run the ruleset over a directory of real documents; print per-rule
     hit counts and matching lines for false-positive tuning."""
-    config = load_config(config_path)
+    config = _load(config_path)
     extractor = LineExtractor(
         dpi=config.extraction.dpi,
         isolate=config.extraction.isolate_worker,
@@ -216,7 +232,7 @@ def test_rules(corpus: str, config_path: str, rule_id: str | None) -> None:
 @click.option("--config", "config_path", required=True, type=click.Path(exists=True))
 def replay_sink(sink_name: str, config_path: str) -> None:
     """Drain a sink's spool in order. Safe to run while the daemon is live."""
-    config = load_config(config_path)
+    config = _load(config_path)
     plugins = config.load_plugins()
     target = next((p for p in plugins if p.name == sink_name), None)
     if target is None or not hasattr(target, "replay"):
@@ -259,7 +275,7 @@ def reprocess(
     immediately. De-escalations are recorded with release_pending, but
     the PDF is deliberately left where it is — release it with
     `dlpduck release <job_id>`."""
-    config = load_config(config_path)
+    config = _load(config_path)
     pipeline = Pipeline(config)
     reprocessor = Reprocessor(pipeline)
 
@@ -330,7 +346,7 @@ def release(job_id: str, config_path: str, reason: str, actor: str | None) -> No
     the PDF from quarantine into the archive. Only works on a job whose
     current assessment has release_pending set — reprocess's verdict is
     not reconsidered here, only executed."""
-    config = load_config(config_path)
+    config = _load(config_path)
     pipeline = Pipeline(config)
     result = Reprocessor(pipeline).release(job_id, reason=reason, actor=actor or getpass.getuser())
 
@@ -364,7 +380,7 @@ def purge_content_cmd(
 
     By default the archived PDF is left in place. Pass --hard to delete it
     too."""
-    config = load_config(config_path)
+    config = _load(config_path)
     pipeline = Pipeline(config)
     try:
         result = pipeline.purge_content(
@@ -410,7 +426,7 @@ def search(
     the cost of a full scan. A job whose content has been purged
     (see `purge-content`) never matches, even though its index row and
     audit trail still exist."""
-    config = load_config(config_path)
+    config = _load(config_path)
     content_root = config.destination.work_dir / "content"
     index_root = config.destination.work_dir / "index"
 
@@ -473,7 +489,7 @@ def retention(config_path: str, do_apply: bool) -> None:
     """Drop whole dt= partitions past each store's configured retention
     window. A store with no window configured is never touched.
     Dry run by default."""
-    config = load_config(config_path)
+    config = _load(config_path)
     plans = plan_retention(config)
 
     any_configured = any(p.cutoff is not None for p in plans)
@@ -530,7 +546,7 @@ def redact_audit_cmd(
     as a chained event naming you and your reason, so this removes
     evidence but never silently.
     """
-    config = load_config(config_path)
+    config = _load(config_path)
     audit = AuditLog(config.audit_dir, integrity=config.audit.integrity)
     try:
         event = audit.redact(
@@ -562,7 +578,7 @@ def compact_index(config_path: str, do_commit: bool) -> None:
 
     Safe to run against a live system, and safe to interrupt.
     """
-    config = load_config(config_path)
+    config = _load(config_path)
     plans = plan_compaction(config.destination.work_dir / "index")
     if not plans:
         click.secho("nothing to compact — every past partition is already one file", fg="green")
@@ -595,7 +611,7 @@ def compact_index(config_path: str, do_commit: bool) -> None:
 @click.option("--config", "config_path", required=True, type=click.Path(exists=True))
 def verify_audit_cmd(config_path: str) -> None:
     """Walk the hash chain and report the first break, if any."""
-    config = load_config(config_path)
+    config = _load(config_path)
     audit = AuditLog(config.audit_dir, integrity=config.audit.integrity)
     if audit.integrity == "none":
         click.secho("audit.integrity is 'none' — chaining is off, nothing to verify", fg="yellow")
@@ -723,7 +739,7 @@ def reindex(config_path: str, do_commit: bool) -> None:
     run by default."""
     from dlpduck.reindex import Reindexer
 
-    config = load_config(config_path)
+    config = _load(config_path)
     pipeline = Pipeline(config)
     summary = Reindexer(pipeline).run(commit=do_commit)
 
@@ -810,13 +826,18 @@ def console_run(config_path: str) -> None:
 
     from dlpduck.console.app import create_app
 
-    config = load_config(config_path)
-    config.apply_umask()
+    config = _load(config_path)
     pipeline = Pipeline(config)
     app = create_app(config, pipeline)
 
     host, port = config.console.host_port()
-    uvicorn.run(app, host=host, port=port)
+    proxies = config.console.forwarded_allow_ips
+    uvicorn.run(
+        app, host=host, port=port,
+        # Uvicorn's own default is to trust 127.0.0.1 only; this widens it
+        # to the configured proxies (see ConsoleConfig.forwarded_allow_ips).
+        **({"proxy_headers": True, "forwarded_allow_ips": proxies} if proxies else {}),
+    )
 
 
 if __name__ == "__main__":

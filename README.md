@@ -277,6 +277,7 @@ console:
   session_max_age_seconds: 28800     # 8h; sessions can be revoked sooner
   session_cookie_secure: false       # set true behind TLS
   audit_search_terms: hashed         # hashed avoids storing search queries
+  forwarded_allow_ips: null          # trusted reverse proxies, e.g. "10.0.0.0/8"
   auth:
     max_failed_logins: 10       # then that username/address waits out the lockout
     lockout_seconds: 300

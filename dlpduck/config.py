@@ -194,6 +194,16 @@ class ConsoleConfig(BaseModel):
     # Repeated searches for the same term still correlate. "plain" is an
     # explicit policy choice for deployments that must retain exact queries.
     audit_search_terms: Literal["plain", "hashed"] = "hashed"
+    # Reverse proxies (an ingress controller, a TLS terminator) whose
+    # X-Forwarded-For / X-Forwarded-Proto headers are believed: a
+    # comma-separated list of addresses or CIDRs, or "*". Unset, only
+    # 127.0.0.1 is trusted. Behind any other proxy this matters twice: the
+    # login throttle keys on the client address, so every user shares the
+    # proxy's and ten bad logins from anyone lock everybody out; and the
+    # OIDC callback URL is built as http:// behind a TLS terminator. Never
+    # set "*" unless the console is reachable only through the proxy —
+    # anyone who can reach it directly could then choose their own address.
+    forwarded_allow_ips: str | None = None
     auth: ConsoleAuthConfig = Field(default_factory=ConsoleAuthConfig)
 
     def host_port(self) -> tuple[str, int]:
@@ -462,13 +472,19 @@ def validate_config(path: str | Path) -> Config:
     if not config.source.path.is_dir():
         raise ConfigError(f"source.path does not exist: {config.source.path}")
 
+    # Created with the configured umask's permissions, not the invoking
+    # shell's: `dlpduck run` validates before it applies the umask, so on
+    # a first start these were the only directories created world-readable.
+    mode = 0o777 & ~int(config.umask, 8) if config.umask is not None else 0o777
     for dest in (
         config.destination.archive,
         config.destination.quarantine,
         config.destination.work_dir,
         config.audit_dir,
     ):
-        dest.mkdir(parents=True, exist_ok=True)
+        if not dest.exists():
+            dest.mkdir(parents=True, exist_ok=True)
+            os.chmod(dest, mode)
 
     from dlpduck.plugins.loader import PluginConfigError
 
@@ -513,6 +529,14 @@ def config_warnings(config: Config) -> list[str]:
         warnings.append(
             f"console.bind is {config.console.bind} but session_cookie_secure is false — "
             "the session cookie will cross plain HTTP. Set it true and terminate TLS in front."
+        )
+
+    if host not in ("127.0.0.1", "::1", "localhost") and config.console.forwarded_allow_ips is None:
+        warnings.append(
+            f"console.bind is {config.console.bind} and console.forwarded_allow_ips is unset — if "
+            "a reverse proxy or ingress fronts the console, every request will appear to come "
+            "from the proxy: one login lockout then locks out everyone, and an OIDC callback "
+            "is built as http://. Set it to the proxy's address(es)."
         )
 
     if config.audit.integrity == "none":

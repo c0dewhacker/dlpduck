@@ -88,6 +88,9 @@ configuration:
       session_max_age_seconds: 28800
       session_cookie_secure: false
       audit_search_terms: hashed
+      # Set to the ingress controller's address range when ingress is
+      # enabled (see DEPLOYMENT.md, "Ingress and TLS").
+      forwarded_allow_ips: null
       auth:
         max_failed_logins: 10
         lockout_seconds: 300

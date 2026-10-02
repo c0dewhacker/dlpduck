@@ -161,6 +161,22 @@ def test_health_endpoints_report_process_and_watcher_state(env):
     assert ready.json()["status"] == "ready"
 
 
+def test_the_unauthenticated_readiness_probe_names_no_document(env):
+    """The heartbeat carries the filename being processed and the backlog.
+    A probe needs neither, and it answers anyone who asks."""
+    (env["config"].destination.work_dir / "watcher.json").write_text(
+        json.dumps({
+            "updated_at": datetime.now(UTC).isoformat(),
+            "state": "Processing",
+            "current_job": "Divorce filing - J Smith.pdf",
+            "backlog": 7,
+        })
+    )
+    body = env["client"].get("/health/ready").json()
+
+    assert body == {"status": "ready", "watcher": {"state": "Processing", "stale": False}}
+
+
 def _login(client: TestClient, username: str) -> None:
     resp = client.post("/login", data={"username": username, "password": PASSWORD})
     assert resp.status_code in (200, 303)
@@ -1752,6 +1768,18 @@ class TestAuthenticationIsAuditedAndThrottled:
 
         [event] = self._auth_events(env, "auth.failed")
         assert "hunter2" not in json.dumps(event)
+
+    def test_an_unknown_username_is_recorded_only_as_a_digest(self, env):
+        """People type their password into the username box. The trail is
+        permanent and auditor-readable, so a name that is not an account is
+        never written as typed — but repeats of it still correlate."""
+        for _ in range(2):
+            env["client"].post("/login", data={"username": "Tr0ub4dor&3", "password": "x"})
+
+        events = self._auth_events(env, "auth.failed")
+        assert all(e["actor"] is None for e in events)
+        assert "Tr0ub4dor" not in json.dumps(events)
+        assert len({e["actor_hmac"] for e in events}) == 1
 
     def test_logging_out_is_recorded(self, env):
         client = env["client"]

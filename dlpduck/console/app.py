@@ -6,6 +6,8 @@ air-gapped and break-glass fallback.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import logging
 from concurrent.futures import ThreadPoolExecutor
@@ -429,7 +431,14 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
         ready = not worker["stale"] and worker.get("state") != "Stopped"
         if not ready:
             response.status_code = 503
-        return {"status": "ready" if ready else "not_ready", "watcher": worker}
+        # Unauthenticated, so only what a probe needs. The heartbeat also
+        # carries the drop-folder filename being processed and the backlog
+        # size — filenames are exactly what metadata_fields keeps out of
+        # the index by default — and those stay behind login, on Overview.
+        return {
+            "status": "ready" if ready else "not_ready",
+            "watcher": {"state": worker.get("state"), "stale": worker["stale"]},
+        }
 
     @app.get("/failed", response_model=None)
     def failed_jobs(request: Request, resolved: bool = False, page: int = Query(1, ge=1),
@@ -591,6 +600,21 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
             },
         )
 
+    def _attempted_actor(username: str) -> dict[str, Any]:
+        """How a failed or throttled login names who tried.
+
+        The username box is free text from an anonymous caller, and the
+        audit trail is permanent. People type their password into it — and
+        that used to be recorded verbatim, forever, readable by auditors.
+        A name that is a configured account is recorded as-is (that is the
+        brute-force evidence an auditor wants); anything else only as a
+        keyed digest, so repeated attempts with one string still line up.
+        """
+        if app.state.user_store.get(username) is not None:
+            return {"actor": username}
+        digest = hmac.new(pipeline.config.hmac_key(), username.encode("utf-8"), hashlib.sha256)
+        return {"actor": None, "actor_hmac": digest.hexdigest()[:32]}
+
     @app.post("/login", response_model=None)
     def login_submit(
         request: Request, username: str = Form(...), password: str = Form(...)
@@ -619,7 +643,7 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
             # reaches the argon2 work — the point is to stop paying for
             # attempts, not just to stop believing them.
             pipeline.audit.append(
-                "auth.throttled", actor=username, client=client, method="local"
+                "auth.throttled", **_attempted_actor(username), client=client, method="local"
             )
             return _refuse("Too many failed attempts. Try again shortly.", 429)
 
@@ -630,7 +654,7 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
             # what they did once inside. Without it a brute-force campaign
             # leaves no trace in the one record an auditor actually reads.
             pipeline.audit.append(
-                "auth.failed", actor=username, client=client, method="local"
+                "auth.failed", **_attempted_actor(username), client=client, method="local"
             )
             return _refuse("Invalid username or password.", 401)
 
@@ -677,6 +701,7 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
 
             claims = token.get("userinfo") or {}
             username = claims.get("preferred_username") or claims.get("sub")
+            client = request.client.host if request.client else ""
             if not username:
                 # Same reasoning as the exchange failure above: a 401 here
                 # would redirect into /login, which redirects back into
@@ -699,7 +724,13 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
             # an IdP's own default/composite roles (e.g. Keycloak's
             # "offline_access") are noise here, not a privilege.
             external = claims.get(oidc_cfg.roles_claim) or []
-            mapped = {oidc_cfg.role_map.get(r, r) for r in external}
+            if isinstance(external, str):
+                # Some IdPs send a single role as a bare string. Iterating
+                # that granted nothing by accident — one character at a time.
+                external = [external]
+            if not isinstance(external, list):
+                external = []
+            mapped = {oidc_cfg.role_map.get(str(r), str(r)) for r in external}
             granted = frozenset(mapped & set(ALL_ROLES))
             if not granted:
                 pipeline.audit.append(
@@ -717,13 +748,36 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
                     ),
                 )
 
+            if app.state.user_store.get(username) is not None:
+                # An IdP username equal to a local account's would make the
+                # two indistinguishable everywhere a name is all there is —
+                # every audit event's actor, and "revoke all sessions for
+                # this user". Usernames at an IdP are often self-chosen, so
+                # this is refused rather than resolved by guessing.
+                pipeline.audit.append(
+                    "auth.failed", actor=username, client=client, method="oidc",
+                    reason="username_collides_with_local_account",
+                    subject=claims.get("sub"), issuer=claims.get("iss"),
+                )
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        f"the identity provider's username {username!r} is also a local account "
+                        "here; sign in with the local account, or have it renamed"
+                    ),
+                )
+
             establish_session(request, username, granted, method="oidc")
             pipeline.audit.append(
                 "auth.succeeded",
                 actor=username,
-                client=request.client.host if request.client else "",
+                client=client,
                 method="oidc",
                 roles=sorted(granted),
+                # The stable identifier behind the display name, so an
+                # auditor can tell two people apart if a name is reused.
+                subject=claims.get("sub"),
+                issuer=claims.get("iss"),
             )
             return RedirectResponse("/jobs", status_code=303)
 
