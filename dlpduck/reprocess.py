@@ -52,11 +52,13 @@ from dlpduck.durability import move_durably, write_atomically
 from dlpduck.engine import DLPEngine
 from dlpduck.index import AssessmentExists, write_row
 from dlpduck.operations import serialized
-from dlpduck.types import DLPHit, DocumentText, JobContext, TextLine
+from dlpduck.types import DLPHit, DocumentText, JobContext, RuleBudgetExceeded, TextLine
 
 logger = logging.getLogger("dlpduck.reprocess")
 
-Direction = Literal["escalate", "deescalate", "changed", "unchanged", "content_unavailable"]
+Direction = Literal[
+    "escalate", "deescalate", "changed", "unchanged", "content_unavailable", "error"
+]
 Mode = Literal["rules", "extract"]
 MODES: tuple[Mode, ...] = ("rules", "extract")
 
@@ -236,6 +238,8 @@ class ReassessmentOutcome:
     new_severity: str | None
     old_hit_count: int
     new_hit_count: int
+    # Set when direction is "error": why this job could not be reassessed.
+    detail: str | None = None
 
 
 @dataclass
@@ -287,7 +291,8 @@ class Reprocessor:
         self, row: dict, mode: Mode = "rules"
     ) -> tuple[ReassessmentOutcome, list[DLPHit] | None, str | None, DocumentText | None]:
         """Returns (outcome, new_hits, new_disposition, text) — the last
-        three are None exactly when direction is "content_unavailable",
+        three are None exactly when direction is "content_unavailable" or
+        "error",
         and `text` is otherwise only populated in "extract" mode (the
         caller uses it to refresh the content store; "rules" mode has
         nothing new to write there).
@@ -307,7 +312,18 @@ class Reprocessor:
             if text is None:
                 return self._unavailable(row), None, None, None
 
-        new_hits = self.engine.scan(text)
+        try:
+            new_hits = self.engine.scan(text)
+        except RuleBudgetExceeded as exc:
+            # One slow rule on one document used to abort the whole batch
+            # mid-way, with a reprocess.started and no reprocess.completed.
+            # Reported per job instead, and nothing is written for it: a
+            # verdict the current ruleset could not finish reaching is not
+            # a verdict, in either direction.
+            return self._error(row, f"rule {exc.rule_id} exceeded its time budget"), None, None, None
+        except Exception as exc:
+            logger.exception("reprocess: scanning job %s raised", job_id)
+            return self._error(row, f"scan failed: {type(exc).__name__}"), None, None, None
         # A degraded extraction stays fail-closed under reprocessing too.
         # "rules" mode never re-examines extraction quality — it can't,
         # it doesn't touch the PDF — so it must not be able to launder a
@@ -357,6 +373,19 @@ class Reprocessor:
             new_hit_count=len(new_hits),
         )
         return outcome, new_hits, new_disposition, (text if mode == "extract" else None)
+
+    def _error(self, row: dict, detail: str) -> ReassessmentOutcome:
+        return ReassessmentOutcome(
+            job_id=row["job_id"],
+            direction="error",
+            old_disposition=row["disposition"],
+            new_disposition=None,
+            old_severity=row["highest_severity"],
+            new_severity=None,
+            old_hit_count=row["hit_count"],
+            new_hit_count=0,
+            detail=detail,
+        )
 
     def _unavailable(self, row: dict) -> ReassessmentOutcome:
         return ReassessmentOutcome(
@@ -427,6 +456,15 @@ class Reprocessor:
 
             if outcome.direction == "content_unavailable":
                 continue
+            if outcome.direction == "error":
+                self.audit.append(
+                    "job.reassessment_failed",
+                    job_id=outcome.job_id,
+                    ruleset_version=self.ruleset_version,
+                    mode=mode,
+                    detail=outcome.detail,
+                )
+                continue
 
             if outcome.direction == "unchanged":
                 if fresh_text is not None:
@@ -461,6 +499,7 @@ class Reprocessor:
             escalated=summary.count("escalate"),
             deescalated=summary.count("deescalate"),
             content_unavailable=summary.count("content_unavailable"),
+            errors=summary.count("error"),
         )
         logger.debug(
             "reprocess (mode=%s) done: %d written, %d escalated, %d deescalated, %d unavailable",

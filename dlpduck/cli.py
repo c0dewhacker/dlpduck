@@ -280,6 +280,8 @@ def reprocess(
     click.echo(f"  de-escalated (release pending):  {summary.count('deescalate')}")
     click.echo(f"  changed (disposition same):      {summary.count('changed')}")
     click.echo(f"  unavailable (content purged):    {summary.count('content_unavailable')}")
+    if summary.count("error"):
+        click.secho(f"  could not be reassessed:         {summary.count('error')}", fg="red")
     click.echo(f"  unchanged:                        {summary.unchanged}")
 
     if do_commit:
@@ -306,6 +308,7 @@ def reprocess(
             f"  [{outcome.direction:20s}] {outcome.job_id}  "
             f"{outcome.old_disposition or '-':10s} -> {outcome.new_disposition or '-':10s}  "
             f"hits {outcome.old_hit_count} -> {outcome.new_hit_count}"
+            + (f"  ({outcome.detail})" if outcome.detail else "")
         )
 
 

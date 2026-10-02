@@ -900,3 +900,45 @@ class TestAssessmentHistoryIsNotClobbered:
         resumed = pipeline.resume_staged(staging)  # must not raise
 
         assert len(resumed) == 1
+
+
+class TestAScanFailureDoesNotAbortTheBatch:
+    """One slow rule on one document used to raise straight out of
+    commit(), leaving the rest of the batch unprocessed and the audit
+    trail with a reprocess.started that never completed."""
+
+    def test_the_failing_job_is_reported_and_the_rest_still_commit(
+        self, tmp_path, hmac_env, monkeypatch
+    ):
+        from dlpduck.types import RuleBudgetExceeded
+
+        narrow = Config.model_validate(
+            _base_config_dict(tmp_path, [{"id": "never", "name": "x", "pattern": "ZZZ_NEVER_ZZZ"}])
+        )
+        pipeline = Pipeline(narrow)
+        staging = narrow.destination.work_dir / "_processing"
+        slow = pipeline.run_job(_pdf(tmp_path / "a.pdf", ["SLOW ACCT-111111"]), None, staging)
+        fine = pipeline.run_job(_pdf(tmp_path / "b.pdf", ["Ref ACCT-222222"]), None, staging)
+
+        wide = Pipeline(Config.model_validate(_base_config_dict(tmp_path, [
+            {"id": "acct", "name": "Account", "pattern": r"ACCT-\d{6}", "action": "quarantine"},
+        ])))
+        real_scan = wide.engine.scan
+
+        def scan(text):
+            if "SLOW" in text.full_text:
+                raise RuleBudgetExceeded("acct")
+            return real_scan(text)
+
+        monkeypatch.setattr(wide.engine, "scan", scan)
+
+        summary = Reprocessor(wide).commit()
+
+        outcomes = {o.job_id: o for o in summary.outcomes}
+        assert outcomes[slow.job_id].direction == "error"
+        assert "time budget" in outcomes[slow.job_id].detail
+        assert outcomes[fine.job_id].direction == "escalate"
+        assert summary.written == 1
+        events = [e["event"] for e in wide.audit.events()]
+        assert "job.reassessment_failed" in events
+        assert "reprocess.completed" in events
