@@ -52,8 +52,8 @@ class TestSeparationOfDuties:
         assert has_permission({AUDITOR}, "jobs.text.read") is False
         assert has_permission({AUDITOR}, "jobs.pdf.read") is False
 
-    def test_auditor_cannot_change_rules_or_release_documents(self):
-        assert has_permission({AUDITOR}, "rules.write") is False
+    def test_auditor_cannot_manage_access_or_release_documents(self):
+        assert has_permission({AUDITOR}, "access.write") is False
         assert has_permission({AUDITOR}, "quarantine.release") is False
         assert has_permission({AUDITOR}, "jobs.purge") is False
 

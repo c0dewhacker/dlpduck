@@ -13,6 +13,7 @@ import pytest
 
 from dlpduck.config import Config
 from dlpduck.content import purge_content
+from dlpduck.durability import move_durably
 from dlpduck.pipeline import Pipeline, content_job_id
 from dlpduck.reprocess import Reprocessor, latest_index_rows
 from tests.pdf_factory import write_pdf
@@ -585,42 +586,42 @@ class TestRelocationIsSafeToRepeat:
         )
         return config, pipeline, ctx
 
-    def test_escalating_a_pdf_already_in_quarantine_adopts_it(self, tmp_path, hmac_env):
+    def test_a_pdf_already_moved_is_adopted_not_reported_missing(self, tmp_path, hmac_env):
         config, pipeline, ctx = self._ingest(tmp_path, hmac_env)
         row = latest_index_rows(pipeline.index_root)[0]
         reprocessor = Reprocessor(pipeline)
-
+        planned = reprocessor._destination_path(
+            ctx.job_id, row["received_at"], row["archive_path"], config.destination.quarantine
+        )
         # The interrupted attempt: the move happened, nothing recorded it.
-        moved = reprocessor._move_to_quarantine(
-            ctx.job_id, row["received_at"], row["archive_path"]
-        )
-        # The operator re-runs it.
-        again = reprocessor._move_to_quarantine(
-            ctx.job_id, row["received_at"], row["archive_path"]
+        move_durably(Path(row["archive_path"]), Path(planned))
+
+        again = reprocessor._destination_path(
+            ctx.job_id, row["received_at"], row["archive_path"], config.destination.quarantine
         )
 
-        assert again == moved
+        assert again == planned
         assert Path(again).is_file(), "the index would point at a path with no file"
 
-    def test_releasing_a_pdf_already_in_the_archive_adopts_it(self, tmp_path, hmac_env):
+    def test_release_direction_adopts_the_same_way(self, tmp_path, hmac_env):
         """Release is the same move pointed the other way, and had the
         same bug — worth its own test so the two cannot drift again."""
         config, pipeline, ctx = self._ingest(tmp_path, hmac_env)
         row = latest_index_rows(pipeline.index_root)[0]
         reprocessor = Reprocessor(pipeline)
-        quarantined = reprocessor._move_to_quarantine(
-            ctx.job_id, row["received_at"], row["archive_path"]
+        quarantined = config.destination.quarantine / Path(row["archive_path"]).parent.name / (
+            f"{ctx.job_id}.pdf"
+        )
+        move_durably(Path(row["archive_path"]), quarantined)
+        # ...and the release's own move then also completed before a crash.
+        move_durably(quarantined, Path(row["archive_path"]))
+
+        where = reprocessor._destination_path(
+            ctx.job_id, row["received_at"], str(quarantined), config.destination.archive
         )
 
-        moved = reprocessor._relocate_pdf(
-            ctx.job_id, row["received_at"], quarantined, config.destination.archive
-        )
-        again = reprocessor._relocate_pdf(
-            ctx.job_id, row["received_at"], quarantined, config.destination.archive
-        )
-
-        assert again == moved
-        assert Path(again).is_file()
+        assert where == row["archive_path"]
+        assert Path(where).is_file()
 
     def test_a_genuinely_missing_pdf_is_still_reported_as_missing(self, tmp_path, hmac_env):
         """The fix must not turn "hard-purged" into "found it" — nothing
@@ -629,8 +630,8 @@ class TestRelocationIsSafeToRepeat:
         row = latest_index_rows(pipeline.index_root)[0]
         Path(row["archive_path"]).unlink()
 
-        where = Reprocessor(pipeline)._move_to_quarantine(
-            ctx.job_id, row["received_at"], row["archive_path"]
+        where = Reprocessor(pipeline)._destination_path(
+            ctx.job_id, row["received_at"], row["archive_path"], config.destination.quarantine
         )
 
         assert where == row["archive_path"]
@@ -644,8 +645,10 @@ class TestRelocationIsSafeToRepeat:
         is, so the document stays reachable."""
         config, pipeline, ctx = self._ingest(tmp_path, hmac_env, "Reference ACCT-482910 attached")
         row = latest_index_rows(pipeline.index_root)[0]
-        Reprocessor(pipeline)._move_to_quarantine(
-            ctx.job_id, row["received_at"], row["archive_path"]
+        move_durably(  # the interrupted attempt: moved, never recorded
+            Path(row["archive_path"]),
+            config.destination.quarantine / Path(row["archive_path"]).parent.name
+            / f"{ctx.job_id}.pdf",
         )
 
         wide = Config.model_validate(

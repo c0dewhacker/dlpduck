@@ -22,7 +22,7 @@ import pyarrow.parquet as pq
 
 from dlpduck.durability import FileAlreadyExists, atomic_write
 from dlpduck.schema import INDEX_SCHEMA
-from dlpduck.types import JobContext
+from dlpduck.types import JobContext, hit_record
 
 logger = logging.getLogger("dlpduck.index")
 
@@ -35,23 +35,7 @@ def index_row(
     ruleset_version: str = "",
     supersedes_seq: int | None = None,
 ) -> dict:
-    hits = [
-        {
-            "rule_id": h.rule_id,
-            "rule_name": h.rule_name,
-            "severity": h.severity.value,
-            "action": h.action,
-            "page_number": h.page_number,
-            "line_number": h.line_number,
-            "line_on_page": h.line_on_page,
-            "start": h.start,
-            "end": h.end,
-            "masked_text": h.masked_text,  # never the raw value
-            "match_hmac": h.match_hmac,
-            "validator": h.validator,
-        }
-        for h in ctx.hits
-    ]
+    hits = [hit_record(h) for h in ctx.hits]
     highest = ctx.highest_severity
     return {
         "job_id": ctx.job_id,

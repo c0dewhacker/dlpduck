@@ -464,7 +464,7 @@ before retrying. Failed documents follow `retention.documents_days`.
 | `jobs.pdf.read` (archived PDFs) | | ✅ | ✅ | |
 | `jobs.pdf.read.quarantined` | | | ✅ | |
 | `dlp.reveal` (cleartext) | | | ✅ | |
-| `quarantine.release`, `jobs.purge`, `rules.write`, `access.write` | | | ✅ | |
+| `quarantine.release`, `jobs.purge`, `access.write` | | | ✅ | |
 | `jobs.failed.manage` (the refused/unprocessable queue) | | | ✅ | |
 | `jobs.reprocess.preview` | | ✅ | ✅ | |
 | `jobs.reprocess.commit` | | | ✅ | |

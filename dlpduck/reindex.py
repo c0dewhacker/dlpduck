@@ -41,6 +41,7 @@ from typing import Literal
 import duckdb
 
 from dlpduck.content import InvalidJobId, read_document_text, validate_job_id, write_content_row
+from dlpduck.disposition import decide
 from dlpduck.index import write_index_row
 from dlpduck.types import JobContext
 
@@ -203,7 +204,10 @@ class Reindexer:
         except Exception as exc:
             return ReindexOutcome(job_id, "failed", written=False, detail=str(exc))
 
-        degraded = text.degraded if source == "pdf" else False  # see module docstring
+        if source == "content":
+            # See the module docstring: whether the original extraction was
+            # degraded is not recoverable from content alone.
+            text.degraded = False
         # WHERE the PDF sits is a surviving record of the disposition that
         # was decided for it, exactly as its dt= partition is a surviving
         # record of when it arrived. A rebuild restores that record; it
@@ -221,8 +225,10 @@ class Reindexer:
         located_disposition = (
             "quarantine" if self._is_in_quarantine(pdf_path) else "archive"
         )
-        ruleset_disposition = (
-            "quarantine" if degraded or any(h.action == "quarantine" for h in hits) else "archive"
+        # The same policy as ingest and reprocess, quarantine_on_degraded
+        # included — this used to be its own copy, which ignored that flag.
+        ruleset_disposition, _ = decide(
+            text, hits, self.pipeline.config.dlp.quarantine_on_degraded
         )
         disposition = located_disposition
         disagrees = ruleset_disposition != located_disposition

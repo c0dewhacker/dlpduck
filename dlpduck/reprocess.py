@@ -52,7 +52,14 @@ from dlpduck.durability import move_durably, write_atomically
 from dlpduck.engine import DLPEngine
 from dlpduck.index import AssessmentExists, write_row
 from dlpduck.operations import serialized
-from dlpduck.types import DLPHit, DocumentText, JobContext, RuleBudgetExceeded, TextLine
+from dlpduck.types import (
+    DLPHit,
+    DocumentText,
+    JobContext,
+    RuleBudgetExceeded,
+    TextLine,
+    hit_record,
+)
 
 logger = logging.getLogger("dlpduck.reprocess")
 
@@ -345,8 +352,7 @@ class Reprocessor:
         old_disposition = row["disposition"]
         if old_disposition == new_disposition:
             same_hits = (
-                row["hits"]
-                == [{**asdict(h), "severity": h.severity.value} for h in new_hits]
+                row["hits"] == [hit_record(h) for h in new_hits]
                 and row["ruleset_version"] == self.ruleset_version
                 and (mode != "extract" or (
                     row["page_count"] == text.page_count
@@ -581,23 +587,7 @@ class Reprocessor:
         if direction == "escalate":
             archive_path = self._destination_path(job_id, prior["received_at"], archive_path, self.destination.quarantine)
 
-        hits_payload = [
-            {
-                "rule_id": h.rule_id,
-                "rule_name": h.rule_name,
-                "severity": h.severity.value,
-                "action": h.action,
-                "page_number": h.page_number,
-                "line_number": h.line_number,
-                "line_on_page": h.line_on_page,
-                "start": h.start,
-                "end": h.end,
-                "masked_text": h.masked_text,
-                "match_hmac": h.match_hmac,
-                "validator": h.validator,
-            }
-            for h in new_hits
-        ]
+        hits_payload = [hit_record(h) for h in new_hits]
         highest = max((h.severity for h in new_hits), key=lambda s: s.rank) if new_hits else None
 
         row = {
@@ -639,6 +629,17 @@ class Reprocessor:
         })
 
     def _destination_path(self, job_id, received_at, current_path, into):
+        """Where a move into `into` will leave this job's PDF.
+
+        The move happens before the index row that records it, so a crash
+        between the two leaves the file already at the destination while
+        the index still names the old place. Looking only at
+        `current_path` cannot tell that apart from "the document is gone",
+        and answering "gone" wrote the stale path into the new assessment —
+        after which the console could never serve the document again. So
+        the destination counts too. With neither on disk (hard-purged) the
+        logical change is still recorded and the path is left as it was.
+        """
         dest = into / f"dt={received_at.date().isoformat()}" / f"{job_id}.pdf"
         return str(dest) if Path(current_path).is_file() or dest.is_file() else current_path
 
@@ -715,47 +716,4 @@ class Reprocessor:
                 metadata={},
                 text=text,
             ),
-        )
-
-    def _relocate_pdf(
-        self, job_id: str, received_at: datetime, current_path: str, into: Path
-    ) -> str:
-        """Move a job's PDF into `into`, and return where it now is.
-
-        Shared by escalation (→ quarantine) and release (→ archive), which
-        are the same operation pointed in opposite directions and were
-        drifting apart as two copies.
-
-        Safe to repeat, which matters because the move happens before the
-        index row that records it: a crash in that gap leaves the file
-        already at the destination while the index still names the old
-        location. Reading only `current_path` cannot tell that apart from
-        "the document is gone", and answering "gone" writes the stale path
-        into the new assessment — after which the console can never serve
-        that document again, permanently, even though the file is sitting
-        right there. So the destination is checked too.
-        """
-        src = Path(current_path)
-        partition = into / f"dt={received_at.date().isoformat()}"
-        dest = partition / f"{job_id}.pdf"
-
-        if not src.is_file():
-            if dest.is_file():
-                return str(dest)  # the move already happened; adopt it
-            # Genuinely gone (e.g. hard-purged) but its content wasn't —
-            # evaluate() already required content to exist, so this is an
-            # inconsistent-but-survivable state. Record the logical
-            # change; there is no file left to move.
-            return current_path
-
-        partition.mkdir(parents=True, exist_ok=True)
-        # shutil.move, not Path.replace — archive and quarantine are
-        # deliberately recommended to sit on separate mounts for ACL
-        # separation, and a plain rename() raises across filesystems.
-        move_durably(src, dest)
-        return str(dest)
-
-    def _move_to_quarantine(self, job_id: str, received_at: datetime, current_path: str) -> str:
-        return self._relocate_pdf(
-            job_id, received_at, current_path, self.destination.quarantine
         )

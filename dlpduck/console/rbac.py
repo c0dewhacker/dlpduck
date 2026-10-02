@@ -41,7 +41,6 @@ _MATRIX: dict[str, tuple[Role, ...]] = {
     "dlp.reveal": (DLP_ADMIN,),  # cleartext
     "quarantine.release": (DLP_ADMIN,),
     "rules.read": ALL_ROLES,
-    "rules.write": (DLP_ADMIN,),
     "jobs.reprocess.preview": (INVESTIGATOR, DLP_ADMIN),
     "jobs.reprocess.commit": (DLP_ADMIN,),
     "jobs.purge": (DLP_ADMIN,),

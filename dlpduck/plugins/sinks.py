@@ -22,7 +22,7 @@ from typing import Any
 
 from dlpduck.plugins.base import Plugin
 from dlpduck.plugins.spool import Spool
-from dlpduck.types import JobContext
+from dlpduck.types import SINK_HIT_FIELDS, JobContext, hit_record
 
 
 class SpoolingSink(Plugin):
@@ -91,23 +91,10 @@ def _job_payload(ctx: JobContext) -> dict[str, Any]:
         "degraded": text.degraded if text else None,
         "highest_severity": ctx.highest_severity.value if ctx.highest_severity else None,
         "hit_count": len(ctx.hits),
-        "hits": [
-            {
-                "rule_id": h.rule_id,
-                "rule_name": h.rule_name,
-                "severity": h.severity.value,
-                "action": h.action,
-                "page_number": h.page_number,
-                "line_number": h.line_number,
-                "masked_text": h.masked_text,
-                # Keyed digest for correlating the same sensitive value
-                # across documents without ever exposing it — the whole
-                # reason match_hmac exists.
-                "match_hmac": h.match_hmac,
-                "validator": h.validator,
-            }
-            for h in ctx.hits
-        ],
+        # match_hmac is included: a keyed digest for correlating the same
+        # sensitive value across documents without ever exposing it — the
+        # whole reason it exists.
+        "hits": [hit_record(h, SINK_HIT_FIELDS) for h in ctx.hits],
         "metadata": ctx.metadata,
         "audit_fields": ctx.audit_fields,
     }

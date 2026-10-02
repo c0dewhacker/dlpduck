@@ -41,6 +41,7 @@ from dlpduck.plugins.base import PluginError, PluginRunner
 from dlpduck.rules import ruleset_version
 from dlpduck.tracing import content_trace_enabled
 from dlpduck.types import (
+    AUDIT_HIT_FIELDS,
     DLPHit,
     DocumentText,
     DocumentTooLarge,
@@ -51,6 +52,7 @@ from dlpduck.types import (
     TextLine,
     TooManyPages,
     UnsafeSourceFile,
+    hit_record,
 )
 
 logger = logging.getLogger("dlpduck.pipeline")
@@ -665,16 +667,7 @@ class Pipeline:
                 degraded=ctx.text.degraded,
                 highest_severity=ctx.highest_severity.value if ctx.highest_severity else None,
                 hit_count=len(ctx.hits),
-                hits=[
-                    {
-                        "rule_id": h.rule_id,
-                        "severity": h.severity.value,
-                        "page_number": h.page_number,
-                        "line_number": h.line_number,
-                        "masked_text": h.masked_text,
-                    }
-                    for h in ctx.hits
-                ],
+                hits=[hit_record(h, AUDIT_HIT_FIELDS) for h in ctx.hits],
                 audit_fields=ctx.audit_fields,
             )
         self._checkpoint(ctx, manifest, "audit")

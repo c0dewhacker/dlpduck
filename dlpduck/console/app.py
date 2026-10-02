@@ -1160,6 +1160,26 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
             {"user": user, "rules": rules_data, "ruleset_version": pipeline.ruleset_version},
         )
 
+    def _audit_context(request: Request, user, *, start: str, end: str, before: int | None,
+                       verify_result: dict[str, Any] | None = None) -> dict[str, Any]:
+        start_d = _parse_date_param(start, "start")
+        end_d = _parse_date_param(end, "end")
+        events = pipeline.audit.events(start=start_d, end=end_d, before=before, limit=101)
+        next_url = None
+        if len(events) > 100:
+            next_url = str(
+                request.url.replace(path="/audit").include_query_params(before=events[99]["seq"])
+            )
+        return {
+            "user": user,
+            "events": events[:100],
+            "next_url": next_url,
+            "filters": {"start": start, "end": end},
+            "can_verify": has_permission(set(user.roles), "audit.verify"),
+            "verify_result": verify_result,
+            "csrf_token": get_csrf_token(request),
+        }
+
     @app.get("/audit", response_model=None)
     def audit_page(
         request: Request,
@@ -1168,21 +1188,8 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
         before: int | None = Query(None, gt=0),
         user=Depends(require_permission("audit.read")),
     ) -> HTMLResponse:
-        start_d = _parse_date_param(start, "start")
-        end_d = _parse_date_param(end, "end")
-        events = pipeline.audit.events(start=start_d, end=end_d, before=before, limit=101)
         return templates.TemplateResponse(
-            request,
-            "audit.html",
-            {
-                "user": user,
-                "events": events[:100],
-                "next_url": str(request.url.include_query_params(before=events[99]["seq"])) if len(events) > 100 else None,
-                "filters": {"start": start, "end": end},
-                "can_verify": has_permission(set(user.roles), "audit.verify"),
-                "verify_result": None,
-                "csrf_token": get_csrf_token(request),
-            },
+            request, "audit.html", _audit_context(request, user, start=start, end=end, before=before)
         )
 
     @app.post("/audit/verify", response_model=None)
@@ -1193,27 +1200,22 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
     ) -> HTMLResponse:
         verify_csrf(request, csrf_token)
         result = pipeline.audit.verify()
-        events = pipeline.audit.events()
+        # The same first page, with the same paging, as GET /audit — this
+        # used to render up to 500 events with no way to page further.
+        verify_result = {
+            "ok": result.ok,
+            "breaks": result.breaks,
+            "detail": "; ".join(str(b) for b in result.breaks[:5]),
+            # Reported even when the chain is intact — an emptied event is
+            # a thing an auditor needs to see, and "no breaks" alone would
+            # imply nothing had been removed.
+            "redactions": result.redactions,
+            "redaction_detail": "; ".join(str(r) for r in result.redactions[:5]),
+        }
         return templates.TemplateResponse(
-            request,
-            "audit.html",
-            {
-                "user": user,
-                "events": events,
-                "filters": {"start": "", "end": ""},
-                "can_verify": True,
-                "verify_result": {
-                    "ok": result.ok,
-                    "breaks": result.breaks,
-                    "detail": "; ".join(str(b) for b in result.breaks[:5]),
-                    # Reported even when the chain is intact — an emptied
-                    # event is a thing an auditor needs to see, and "no
-                    # breaks" alone would imply nothing had been removed.
-                    "redactions": result.redactions,
-                    "redaction_detail": "; ".join(str(r) for r in result.redactions[:5]),
-                },
-                "csrf_token": get_csrf_token(request),
-            },
+            request, "audit.html",
+            _audit_context(request, user, start="", end="", before=None,
+                           verify_result=verify_result),
         )
 
     @app.get("/access", response_model=None)

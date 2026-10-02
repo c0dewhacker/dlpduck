@@ -1221,6 +1221,20 @@ class TestAuditScreen:
         assert resp.status_code == 200
         assert "Chain intact" in resp.text
 
+    def test_verify_shows_the_same_paged_view_as_the_audit_page(self, env):
+        """It used to render up to 500 events with no way to page on."""
+        for n in range(120):
+            env["pipeline"].audit.append("test.filler", n=n)
+        client = env["client"]
+        _login(client, "aud1")
+        page = client.get("/audit")
+
+        resp = client.post("/audit/verify", data={"csrf_token": _csrf_token(page.text)})
+
+        assert "Chain intact" in resp.text
+        assert resp.text.count("test.filler") <= 100
+        assert 'href="http://testserver/audit?before=' in resp.text
+
     def test_verify_action_surfaces_redactions_alongside_intact(self, env):
         """The console must not answer "Chain intact." and stop when
         content has been deliberately emptied out of it — that reads as
