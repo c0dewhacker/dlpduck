@@ -279,10 +279,20 @@ class AuditLog:
         # Resume from the last record that actually parses. A half-written
         # trailing line is exactly what an unclean shutdown leaves, and it
         # must not stop the daemon coming back up.
-        event = _last_parseable_event(files[-1])
-        if event is None:
-            return 0, None
-        return event.get("seq", 0), event.get("hash")
+        #
+        # Walked back across partitions, not just the newest: a crash during
+        # the first write of a new day leaves a partition holding nothing
+        # parseable, and treating that as "no history" restarted seq at 1
+        # and the chain at None — duplicate sequence numbers and a
+        # verify-audit break that no tampering caused.
+        for path in reversed(files):
+            event = _last_parseable_event(path)
+            if event is not None:
+                return event.get("seq", 0), event.get("hash")
+        checkpoint = self._read_checkpoint()
+        if checkpoint:
+            return checkpoint["seq"], checkpoint["hash"]
+        return 0, None
 
     @contextmanager
     def _appending(self) -> Iterator[None]:

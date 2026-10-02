@@ -371,6 +371,21 @@ class TestACorruptRecordDoesNotTakeDownTheTrail:
         assert any(b.line_no == 2 for b in breaks)
 
 
+    def test_a_new_day_whose_first_write_was_torn_continues_the_chain(self, tmp_path):
+        """The crash lands on the first event of a new day, so the newest
+        partition holds nothing parseable. Resuming from it alone restarted
+        seq at 1 and the chain at None — a verify break nobody caused."""
+        log = AuditLog(tmp_path)
+        last = [log.append("job.completed", job_id="a" * 32, n=i) for i in range(3)][-1]
+        torn = tmp_path / "dt=2999-01-01" / "events.jsonl"
+        torn.parent.mkdir()
+        torn.write_text('{"seq":4,"event":"job.comple')
+
+        resumed = AuditLog(tmp_path)
+
+        assert (resumed._seq, resumed._prev_hash) == (3, last["hash"])
+
+
 class TestPartitionDatesAreUTC:
     """Everything in DLPDuck partitions on UTC — dt= directories, the
     index, the content store. The console's date filters therefore mean
