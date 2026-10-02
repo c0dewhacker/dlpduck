@@ -73,7 +73,9 @@ class ExtractionConfig(BaseModel):
     # Address-space ceiling for each isolated worker, in MB. A hostile file
     # that asks a parser for an enormous allocation then fails that one
     # worker instead of pushing the host into swap or the OOM killer.
-    # 4096 leaves OCR comfortable headroom; null removes the cap.
+    # This is address space, not resident memory: OCR reserves far more
+    # than it touches, and below about 4096 it silently reads nothing, so
+    # every scan fails closed as degraded. Null removes the cap.
     worker_memory_mb: int | None = Field(default=4096, ge=512)
     native_min_chars: int = Field(default=20, ge=0)  # evaluated per page
     # A page OCR reads nothing from is degraded (and so quarantines the

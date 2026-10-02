@@ -65,7 +65,9 @@ extraction:
   isolate_worker: true
   # Everything that parses a dropped file — extraction, the claim-time
   # read of a PDF's metadata, image decoding — runs in that child, with
-  # its address space capped here (MB; null removes the cap).
+  # its address space capped here (MB; null removes the cap). This is
+  # virtual, not resident, memory: OCR reserves far more than it uses, and
+  # below about 4096 it reads nothing, so every scan fails closed.
   worker_memory_mb: 4096
 
 dlp:

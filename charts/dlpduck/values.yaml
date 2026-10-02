@@ -53,6 +53,7 @@ configuration:
       name: kubernetes
       path: /data/drop
       metadata_format: none
+      image_suffixes: [.tif, .tiff, .jpg, .jpeg, .png]
       poll_seconds: 5.0
       stability_polls: 2
       metadata_grace_polls: 3
@@ -61,11 +62,17 @@ configuration:
       max_pages: 500
       rule_budget_ms: 2000
       max_metadata_bytes: 1048576
+      max_image_pixels: 150000000
     extraction:
       dpi: 150
       native_min_chars: 20
       isolate_worker: true
       timeout_seconds: 120
+      blank_page_max_ink: 0.0001
+      # Address space per isolated worker, not resident memory: OCR reserves
+      # far more than it touches, and below ~4096 it silently reads nothing
+      # (every scan then fails closed as degraded).
+      worker_memory_mb: 4096
     dlp:
       quarantine_on_degraded: true
       hmac_key_env: DLPDUCK_HMAC_KEY
