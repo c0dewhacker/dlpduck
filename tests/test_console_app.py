@@ -8,7 +8,6 @@ import json
 import re
 import shutil
 import threading
-from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -138,6 +137,16 @@ def _csrf_token(html: str) -> str:
     return match.group(1)
 
 
+def _beat(env, identity=None, **record):
+    from dlpduck import heartbeat
+
+    heartbeat.write(
+        env["config"].destination.work_dir,
+        identity or heartbeat.instance_identity(env["config"].cluster.identity),
+        record,
+    )
+
+
 def test_health_endpoints_report_process_and_watcher_state(env):
     client = env["client"]
     assert client.get("/health/live").json() == {"status": "ok"}
@@ -146,16 +155,7 @@ def test_health_endpoints_report_process_and_watcher_state(env):
     assert missing.status_code == 503
     assert missing.json()["watcher"]["stale"] is True
 
-    (env["config"].destination.work_dir / "watcher.json").write_text(
-        json.dumps(
-            {
-                "updated_at": datetime.now(UTC).isoformat(),
-                "state": "Watching",
-                "current_job": None,
-                "backlog": 0,
-            }
-        )
-    )
+    _beat(env, state="Watching", current_job=None, backlog=0)
     ready = client.get("/health/ready")
     assert ready.status_code == 200
     assert ready.json()["status"] == "ready"
@@ -164,17 +164,35 @@ def test_health_endpoints_report_process_and_watcher_state(env):
 def test_the_unauthenticated_readiness_probe_names_no_document(env):
     """The heartbeat carries the filename being processed and the backlog.
     A probe needs neither, and it answers anyone who asks."""
-    (env["config"].destination.work_dir / "watcher.json").write_text(
-        json.dumps({
-            "updated_at": datetime.now(UTC).isoformat(),
-            "state": "Processing",
-            "current_job": "Divorce filing - J Smith.pdf",
-            "backlog": 7,
-        })
-    )
+    _beat(env, state="Processing", current_job="Divorce filing - J Smith.pdf", backlog=7)
     body = env["client"].get("/health/ready").json()
 
     assert body == {"status": "ready", "watcher": {"state": "Processing", "stale": False}}
+
+
+class TestHeartbeatsArePerInstance:
+    """One shared watcher.json described whichever replica wrote last, and
+    a terminating pod's "Stopped" failed every pod's readiness at once."""
+
+    def test_another_pod_stopping_does_not_make_this_one_unready(self, env):
+        _beat(env, state="Watching")
+        _beat(env, identity="dlpduck-old-pod", state="Stopped")
+        assert env["client"].get("/health/ready").status_code == 200
+
+    def test_this_pod_stopping_does(self, env):
+        _beat(env, state="Stopped")
+        assert env["client"].get("/health/ready").status_code == 503
+
+    def test_a_console_with_no_watcher_of_its_own_uses_any_live_one(self, env):
+        _beat(env, identity="watcher-elsewhere", state="Watching")
+        assert env["client"].get("/health/ready").status_code == 200
+
+    def test_overview_shows_the_instance_doing_the_work(self, env):
+        _beat(env, state="Standby", backlog=3)
+        _beat(env, identity="dlpduck-leader", state="Processing", backlog=3)
+        client = env["client"]
+        _login(client, "admin1")
+        assert "Processing" in client.get("/").text
 
 
 def _login(client: TestClient, username: str) -> None:

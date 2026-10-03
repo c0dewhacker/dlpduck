@@ -23,7 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from dlpduck import __version__
+from dlpduck import __version__, heartbeat
 from dlpduck.config import Config
 from dlpduck.console.auth import (
     LocalUserStore,
@@ -417,15 +417,12 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
             status_code=exc.status_code,
         )
 
+    identity = heartbeat.instance_identity(config.cluster.identity)
+    stale_after = max(config.source.poll_seconds * 3, 30)
+
     def _worker_health():
-        path = config.destination.work_dir / "watcher.json"
-        try:
-            health = json.loads(path.read_text())
-            age = (datetime.now(UTC) - datetime.fromisoformat(health["updated_at"])).total_seconds()
-            health["stale"] = age > max(config.source.poll_seconds * 3, 30)
-            return health
-        except (OSError, ValueError, KeyError):
-            return {"stale": True, "state": "No worker heartbeat", "backlog": None}
+        """This instance's watcher, for readiness (see dlpduck.heartbeat)."""
+        return heartbeat.own(config.destination.work_dir, identity, stale_after)
 
     @app.get("/health/live")
     def health_live() -> dict[str, str]:
@@ -576,7 +573,7 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
                 "stats": stats,
                 "recent_jobs": recent,
                 "names": pipeline.operations.display_names(row["job_id"] for row in recent),
-                "health": _worker_health(),
+                "health": heartbeat.cluster(config.destination.work_dir, identity, stale_after),
                 "today": today_utc.isoformat(),
                 "extraction_timeout": config.extraction.timeout_seconds,
                 "can_verify": has_permission(set(user.roles), "audit.verify"),

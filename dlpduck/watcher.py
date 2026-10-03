@@ -12,16 +12,14 @@ Pipeline.claim() still derives what it can from the PDF itself.
 
 from __future__ import annotations
 
-import json
 import logging
 import threading
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 
+from dlpduck import heartbeat
 from dlpduck.config import Config
-from dlpduck.durability import write_atomically
 from dlpduck.pipeline import CLAIM_REFUSALS, Pipeline
 
 logger = logging.getLogger("dlpduck.watcher")
@@ -52,13 +50,14 @@ class Watcher:
         # always — see cluster.parallel_extraction. True: claim only,
         # and leave extraction to a sweep (cli.py's run command).
         self._claim_only = claim_only
+        self._identity = heartbeat.instance_identity(config.cluster.identity)
 
     def _heartbeat(self):
-        write_atomically(self.config.destination.work_dir / "watcher.json", json.dumps({
-            "updated_at": datetime.now(UTC).isoformat(), "state": self._state,
+        heartbeat.write(self.config.destination.work_dir, self._identity, {
+            "state": self._state,
             "current_job": self._current,
             "backlog": len(self._candidates()),
-        }))
+        })
 
     def _candidates(self, listing: dict[str, Path] | None = None) -> list[Path]:
         """Every file in the drop folder this source picks up — PDFs and
