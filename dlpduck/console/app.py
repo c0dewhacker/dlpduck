@@ -63,7 +63,7 @@ _FAILED_MEDIA = {
 }
 
 
-def _rederive_hit_value(doc, hit: dict[str, Any], rules) -> str | None:
+def _rederive_hit_value(doc, hit: dict[str, Any]) -> str | None:
     """Recover a hit's cleartext from the content store.
 
     The raw value is never stored, so reveal re-derives it from the
@@ -89,8 +89,14 @@ def _rederive_hit_value(doc, hit: dict[str, Any], rules) -> str | None:
         return None
     candidate = doc.full_text[start:end]
 
-    rule = next((r for r in rules if r.id == hit["rule_id"]), None)
-    if rule is not None and mask(candidate, rule.mask_keep) != hit["masked_text"]:
+    # Checked against the mask as it was recorded, not as the rule's
+    # mask_keep says today. Looking the rule up instead meant a hit from a
+    # rule since removed was revealed with no check at all, and one whose
+    # mask_keep has since changed could never be revealed. The stored mask
+    # itself says how many trailing characters were kept.
+    masked = hit["masked_text"] or ""
+    keep = sum(1 for c in masked if c != "•")
+    if mask(candidate, keep) != masked:
         return None
     return candidate
 
@@ -917,7 +923,7 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
         # position rather than from any value stored at scan time, since
         # none is: DLPHit never carries the raw match.
         doc = read_document_text(pipeline.content_root, job_id)
-        raw_value = _rederive_hit_value(doc, hit, pipeline.engine.rules)
+        raw_value = _rederive_hit_value(doc, hit)
 
         pipeline.audit.append(
             "dlp.revealed",

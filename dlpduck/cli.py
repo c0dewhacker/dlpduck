@@ -686,7 +686,12 @@ def run(config_path: str) -> None:
         min_age = config.extraction.timeout_seconds + 60
 
     def sweep_forever() -> None:
-        while not stop_event.wait(sweep_interval):
+        # In parallel mode the first pass runs at once, as it always did —
+        # a pod that just started should not idle for an interval while
+        # staged work waits. Otherwise startup already swept, above.
+        first = config.cluster.parallel_extraction
+        while first or not stop_event.wait(sweep_interval):
+            first = False
             try:
                 resumed = pipeline.resume_staged(staging_root, min_age_seconds=min_age)
                 if resumed:

@@ -78,6 +78,10 @@ def content_job_id(pdf_bytes: bytes) -> str:
     return hashlib.blake2b(pdf_bytes, digest_size=16).hexdigest()
 
 
+# Bumped when the staging manifest gains something older readers lacked.
+# 2: `audit_started` precedes the completion append; `metadata` is recorded.
+MANIFEST_VERSION = 2
+
 # Names this pipeline writes into a job's staging directory itself. A
 # sender's companion file is never staged under its own name, so none of
 # these can be overwritten from the drop folder.
@@ -191,9 +195,12 @@ class Pipeline:
         """The PDF's own Info dictionary. Reading it means parsing the PDF,
         so it happens in the isolated worker whenever extraction does."""
         if self.config.extraction.isolate_worker:
+            # Bounded well below the extraction budget: this runs inside
+            # claim, on the watcher's single poll thread, and reading an
+            # Info dictionary is milliseconds of work for any honest PDF.
             return inspect_isolated(
                 pdf_bytes,
-                timeout=self.config.extraction.timeout_seconds,
+                timeout=min(30.0, self.config.extraction.timeout_seconds),
                 memory_mb=self.config.extraction.worker_memory_mb,
             )
         return extract_pdf_metadata(pdf_bytes)
@@ -405,7 +412,7 @@ class Pipeline:
         received_at = datetime.now(UTC)
         manifest: dict[str, Any] = {"receipt_id": receipt_id, "received_at": received_at.isoformat(),
                     "filename": pdf_path.name, "source_name": self.config.source.name,
-                    "steps": []}
+                    "steps": [], "version": MANIFEST_VERSION}
         if origin is not None:
             manifest["origin"] = origin
         write_atomically(staging_dir / "manifest.json", json.dumps(manifest))
@@ -482,6 +489,11 @@ class Pipeline:
 
         metadata = allowlist(raw_metadata, self.config.source.metadata_fields)
         self.operations.receipt_metadata(job_id, receipt_id, metadata)
+        # Kept with the job, so whichever replica's sweep picks it up uses
+        # what was decided here instead of parsing the PDF (in another
+        # worker process) and the companion all over again.
+        manifest["metadata"] = metadata
+        write_atomically(staging_dir / "manifest.json", json.dumps(manifest))
         if content_trace_enabled():
             logger.debug("job %s claimed metadata: %r", job_id, metadata)
         else:
@@ -612,7 +624,12 @@ class Pipeline:
         the append, so the trail is read only when that marker says an
         append may have happened, and then only from the receipt's own day.
         """
-        if "audit_started" not in manifest["steps"] or not manifest.get("receipt_id"):
+        if not manifest.get("receipt_id"):
+            return False
+        # A manifest from before `audit_started` existed cannot say either
+        # way, so it gets the old full check.
+        legacy = manifest.get("version", 1) < MANIFEST_VERSION
+        if not legacy and "audit_started" not in manifest["steps"]:
             return False
         since = None
         if manifest.get("received_at"):
@@ -1036,6 +1053,28 @@ class Pipeline:
         )
         return legacy[0] if legacy else None
 
+    def _staged_metadata(self, job_dir: Path, manifest: dict, pdf_bytes: bytes) -> dict:
+        """The allowlisted metadata claim settled on for this job. A
+        directory staged by an older release has none recorded, so it is
+        derived again from the PDF and the staged companion."""
+        if isinstance(manifest.get("metadata"), dict):
+            return manifest["metadata"]
+        raw_metadata: dict = self._pdf_metadata(pdf_bytes)
+        companion = self._staged_companion(job_dir)
+        if companion is not None:
+            content, _ = _read_bounded_with_stat(companion, self.config.limits.max_metadata_bytes)
+            if content is None:
+                logger.warning(
+                    "companion %s exceeds limits.max_metadata_bytes — ignoring it",
+                    companion.name,
+                )
+            else:
+                try:
+                    raw_metadata = {**raw_metadata, **self.metadata_parser.parse(content)}
+                except Exception as exc:
+                    logger.warning("metadata parse failed resuming %s: %s", job_dir.name, exc)
+        return allowlist(raw_metadata, self.config.source.metadata_fields)
+
     def _resume_one(self, job_dir: Path, staged_pdf: Path) -> JobContext | None:
         logger.debug("resume_staged: found staged job %s", job_dir.name)
         pdf_bytes = staged_pdf.read_bytes()
@@ -1056,7 +1095,6 @@ class Pipeline:
             self._warned_uncertain.add(recovered_id)
             log("job %s needs explicit delivery retry; leaving staged", recovered_id)
             return None
-        raw_metadata: dict = self._pdf_metadata(pdf_bytes)
         if manifest.get("receipt_id"):
             self.operations.receipt(
                 manifest["receipt_id"],
@@ -1065,28 +1103,14 @@ class Pipeline:
                 manifest.get("filename", "document.pdf"),
                 manifest.get("source_name", self.config.source.name),
             )
-        companion = self._staged_companion(job_dir)
-        if companion is not None:
-            content, _ = _read_bounded_with_stat(companion, self.config.limits.max_metadata_bytes)
-            if content is None:
-                logger.warning(
-                    "companion %s exceeds limits.max_metadata_bytes — ignoring it",
-                    companion.name,
-                )
-            else:
-                try:
-                    raw_metadata = {**raw_metadata, **self.metadata_parser.parse(content)}
-                except Exception as exc:
-                    logger.warning("metadata parse failed resuming %s: %s", recovered_id, exc)
-
         ctx = JobContext(
             job_id=recovered_id,
             received_at=datetime.fromisoformat(manifest["received_at"]) if manifest.get("received_at") else datetime.fromtimestamp(staged_pdf.stat().st_mtime, UTC),
-            source_name=self.config.source.name,
+            source_name=manifest.get("source_name", self.config.source.name),
             staging_dir=job_dir,
             pdf_path=staged_pdf,
             pdf_sha256=hashlib.sha256(pdf_bytes).hexdigest(),
-            metadata=allowlist(raw_metadata, self.config.source.metadata_fields),
+            metadata=self._staged_metadata(job_dir, manifest, pdf_bytes),
         )
         if not manifest.get("assessment"):
             # No extraction done yet — this is either a genuinely fresh

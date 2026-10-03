@@ -183,23 +183,27 @@ class LineExtractor:
         return reduced
 
     def _page_rows(self, page) -> _PageResult:
+        has_images = any(page.get_objects(filter=[pdfium_c.FPDF_PAGEOBJ_IMAGE]))
+        rotation = page.get_rotation()
+        native_boxes: list[_Box] = []
         text_page = page.get_textpage()
         try:
             native = [
                 line.strip() for line in text_page.get_text_bounded().splitlines() if line.strip()
             ]
-            # Positioned native runs, for a page that also has images: those
-            # rows have to be interleaved with what OCR finds in the images.
-            native_boxes = self._native_boxes(page, text_page)
+            enough_native = sum(len(line) for line in native) >= self.NATIVE_MIN_CHARS
+            # Positioned native runs, only for a page that also has images:
+            # those rows have to be interleaved with what OCR finds in them.
+            # Not collected otherwise — it is a text query per run, and most
+            # pages are plain native text that never needs it.
+            if enough_native and has_images and rotation == 0:
+                native_boxes = self._native_boxes(page, text_page)
         finally:
             text_page.close()
         # PDFium reports bounded text bottom-to-top for quarter-turn pages.
         # Restore the content order used by unrotated and other rotated pages.
-        rotation = page.get_rotation()
         if rotation == 90:
             native.reverse()
-        has_images = any(page.get_objects(filter=[pdfium_c.FPDF_PAGEOBJ_IMAGE]))
-        enough_native = sum(len(line) for line in native) >= self.NATIVE_MIN_CHARS
         if enough_native and not has_images:
             return _PageResult([_Row(t, "native", None) for t in native], "native", None)
 
@@ -235,7 +239,7 @@ class LineExtractor:
         # the images. This used to discard the native layer entirely and
         # rely on OCR for the whole page, so a logo on a letterhead was
         # enough to downgrade every line to an OCR guess.
-        if enough_native and native_boxes and rotation == 0:
+        if native_boxes:
             extra = [b for b in ocr_boxes if not any(_overlaps(b, n) for n in native_boxes)]
             rows = self._cluster(native_boxes + extra)
             return _PageResult(rows, "mixed" if extra else "native", conf if extra else None)

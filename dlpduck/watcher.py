@@ -60,11 +60,11 @@ class Watcher:
             "backlog": len(self._candidates()),
         }))
 
-    def _candidates(self) -> list[Path]:
+    def _candidates(self, listing: dict[str, Path] | None = None) -> list[Path]:
         """Every file in the drop folder this source picks up — PDFs and
         scanner images, with the suffix matched regardless of case."""
-        src = self.config.source.path
-        return sorted(p for p in src.iterdir() if self.config.source.accepts(p.name))
+        entries = listing.values() if listing is not None else self.config.source.path.iterdir()
+        return sorted(p for p in entries if self.config.source.accepts(p.name))
 
     def _companion(self, document: Path, listing: dict[str, Path]) -> Path | None:
         """The metadata file beside `document`: same stem, metadata_suffix,
@@ -86,7 +86,7 @@ class Watcher:
         seen_this_poll: set[Path] = set()
         listing = {p.name.lower(): p for p in src.iterdir()}
 
-        for pdf_path in self._candidates():
+        for pdf_path in self._candidates(listing):
             seen_this_poll.add(pdf_path)
             try:
                 size = pdf_path.stat().st_size

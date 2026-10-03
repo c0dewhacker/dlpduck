@@ -2019,3 +2019,38 @@ def test_a_refused_scanner_image_downloads_as_what_it_is(env):
     assert resp.status_code == 200
     assert resp.headers["content-type"] == "image/tiff"
     assert resp.headers["content-disposition"].startswith("attachment")
+
+
+class TestRevealChecksTheRecordedMask:
+    """The candidate slice used to be checked against the rule's mask_keep
+    as configured today: a hit from a since-removed rule skipped the check
+    entirely, and one whose mask_keep had changed could never be revealed."""
+
+    def _doc(self, text):
+        from dlpduck.types import DocumentText, TextLine
+
+        doc = DocumentText(page_count=1)
+        doc.add_line(TextLine(0, 1, 0, 1, text, "native"))
+        return doc
+
+    def _hit(self, masked, start=5, end=24):
+        return {"line_number": 0, "start": start, "end": end, "masked_text": masked,
+                "rule_id": "gone.rule"}
+
+    def test_a_tail_kept_at_scan_time_still_verifies(self):
+        from dlpduck.console.app import _rederive_hit_value
+
+        doc = self._doc("Card 4111 1111 1111 1111 on file")
+        assert _rederive_hit_value(doc, self._hit("••••••••••••1111")) == "4111 1111 1111 1111"
+
+    def test_a_fully_masked_hit_still_verifies(self):
+        from dlpduck.console.app import _rederive_hit_value
+
+        doc = self._doc("Card 4111 1111 1111 1111 on file")
+        assert _rederive_hit_value(doc, self._hit("•" * 16)) == "4111 1111 1111 1111"
+
+    def test_text_that_no_longer_matches_the_mask_reveals_nothing(self):
+        from dlpduck.console.app import _rederive_hit_value
+
+        doc = self._doc("Card 4111 1111 1111 9999 on file")  # re-extracted differently
+        assert _rederive_hit_value(doc, self._hit("••••••••••••1111")) is None
