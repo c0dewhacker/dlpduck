@@ -44,15 +44,13 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Literal
 
-import duckdb
-
 from dlpduck.content import read_document_text, write_content_row
 from dlpduck.disposition import decide
 from dlpduck.durability import move_durably, write_atomically
 from dlpduck.engine import DLPEngine
 from dlpduck.index import AssessmentExists, write_row
 from dlpduck.operations import serialized
-from dlpduck.search import IndexFilters
+from dlpduck.search import IndexFilters, run_query
 from dlpduck.types import (
     DLPHit,
     DocumentText,
@@ -63,6 +61,11 @@ from dlpduck.types import (
 )
 
 logger = logging.getLogger("dlpduck.reprocess")
+
+# Index reads had no time bound at all, so a slow store could hold a
+# console request (or the watcher's duplicate check) indefinitely. Generous,
+# because these are the reads everything else depends on.
+INDEX_QUERY_SECONDS = 120.0
 
 Direction = Literal[
     "escalate", "deescalate", "changed", "unchanged", "content_unavailable", "error"
@@ -136,15 +139,8 @@ def index_stats(index_root: Path, today: date) -> dict:
             count(*) FILTER (WHERE release_pending)
         FROM current
     """
-    con = duckdb.connect()
-    try:
-        con.execute("SET TimeZone='UTC'")  # same reason as latest_index_rows
-        counted = con.execute(sql, [glob, today]).fetchone()
-        if counted is None:  # an ungrouped aggregate always returns a row
-            return empty
-        total, today_count, quarantined, pending = counted
-    finally:
-        con.close()
+    [counted] = run_query(sql, [glob, today], INDEX_QUERY_SECONDS)
+    total, today_count, quarantined, pending = counted
     return {
         "total": total,
         "today": today_count,
@@ -226,20 +222,11 @@ def latest_index_rows(
         {"LIMIT ?" if limit is not None else ""}
         OFFSET ?
     """
-    con = duckdb.connect()
-    try:
-        # DuckDB defaults its session TimeZone to the LOCAL system zone and
-        # silently converts TIMESTAMPTZ columns on read. received_at was
-        # written as raw UTC (datetime.now(timezone.utc)) and its .date()
-        # is what chose the dt= partition — reading it back local-shifted
-        # would compute a different date near local midnight and put a
-        # reassessment in the wrong partition. Pin UTC so round-tripping a
-        # timestamp through DuckDB always agrees with how it was written.
-        con.execute("SET TimeZone='UTC'")
-        bound = [glob, *params] + ([limit] if limit is not None else []) + [offset]
-        rows = con.execute(sql, bound).fetchall()
-    finally:
-        con.close()
+    # run_query pins the session to UTC: received_at was written as UTC and
+    # its .date() chose the dt= partition, so reading it local-shifted would
+    # put a reassessment in the wrong partition near midnight.
+    bound = [glob, *params] + ([limit] if limit is not None else []) + [offset]
+    rows = run_query(sql, bound, INDEX_QUERY_SECONDS)
     return [dict(zip(_INDEX_COLUMNS, r, strict=True)) for r in rows]
 
 

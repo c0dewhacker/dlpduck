@@ -16,7 +16,6 @@ import getpass
 import json
 import os
 import sys
-from datetime import date
 
 import click
 
@@ -27,16 +26,6 @@ from dlpduck.search import search as run_search
 
 def _actor() -> str:
     return os.environ.get("DLPDUCK_ACTOR", getpass.getuser())
-
-
-def _date(value: str | None, flag: str) -> date | None:
-    if not value:
-        return None
-    try:
-        return date.fromisoformat(value)
-    except ValueError:
-        click.secho(f"{flag} must be a date in YYYY-MM-DD form, got {value!r}", fg="red")
-        sys.exit(1)
 
 
 def _fail(message: str) -> None:
@@ -72,8 +61,10 @@ def filter_options(func):
             )
         except SearchError as exc:
             _fail(f"invalid filter: {exc}")
-        return func(*args, start=_date(start_str, "--start"), end=_date(end_str, "--end"),
-                    filters=filters, **kwargs)
+        from dlpduck.cli import _parse_date_option
+
+        return func(*args, start=_parse_date_option(start_str, "--start"),
+                    end=_parse_date_option(end_str, "--end"), filters=filters, **kwargs)
 
     return wrapper
 

@@ -38,11 +38,11 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Literal
 
-import duckdb
-
 from dlpduck.content import InvalidJobId, read_document_text, validate_job_id, write_content_row
 from dlpduck.disposition import decide
 from dlpduck.index import write_index_row
+from dlpduck.reprocess import INDEX_QUERY_SECONDS
+from dlpduck.search import run_query
 from dlpduck.types import JobContext
 
 Source = Literal["content", "pdf", "failed"]
@@ -53,15 +53,12 @@ def indexed_job_ids(index_root: Path) -> set[str]:
     if not any(index_root.glob("dt=*/*.parquet")):
         return set()
     glob = str(index_root / "dt=*" / "*.parquet")
-    con = duckdb.connect()
-    try:
-        rows = con.execute(
-            "SELECT DISTINCT job_id FROM read_parquet(?, hive_partitioning = true, "
-            "union_by_name = true)",
-            [glob],
-        ).fetchall()
-    finally:
-        con.close()
+    rows = run_query(
+        "SELECT DISTINCT job_id FROM read_parquet(?, hive_partitioning = true, "
+        "union_by_name = true)",
+        [glob],
+        INDEX_QUERY_SECONDS,
+    )
     return {r[0] for r in rows}
 
 
