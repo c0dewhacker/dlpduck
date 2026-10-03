@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import getpass
 import logging
-import os
 import signal
 import sys
 import threading
@@ -24,8 +23,6 @@ from dlpduck.leader import build_leader_election
 from dlpduck.pipeline import Pipeline
 from dlpduck.reprocess import Reprocessor, parse_mode
 from dlpduck.retention import apply_retention, plan_retention
-from dlpduck.search import QueryTimeout, SearchError, audit_terms
-from dlpduck.search import search as run_search
 from dlpduck.tracing import configure_logging
 from dlpduck.types import DocumentTooLarge, EncryptedDocument, RuleBudgetExceeded
 from dlpduck.watcher import Watcher
@@ -407,81 +404,6 @@ def purge_content_cmd(
 
 
 @main.command()
-@click.argument("query")
-@click.option("--config", "config_path", required=True, type=click.Path(exists=True))
-@click.option("--start", "start_str", default=None, help="YYYY-MM-DD, inclusive")
-@click.option("--end", "end_str", default=None, help="YYYY-MM-DD, inclusive")
-@click.option("--severity", default=None, help="INFO|LOW|MEDIUM|HIGH|CRITICAL")
-@click.option("--limit", default=100, help="Max results (default 100)")
-def search(
-    query: str,
-    config_path: str,
-    start_str: str | None,
-    end_str: str | None,
-    severity: str | None,
-    limit: int,
-) -> None:
-    """Full-text search, joining the content store against the metadata
-    index. The date range is optional — omit it to search everything, at
-    the cost of a full scan. A job whose content has been purged
-    (see `purge-content`) never matches, even though its index row and
-    audit trail still exist."""
-    config = _load(config_path)
-    content_root = config.destination.work_dir / "content"
-    index_root = config.destination.work_dir / "index"
-
-    start = _parse_date_option(start_str, "--start")
-    end = _parse_date_option(end_str, "--end")
-
-    try:
-        response = run_search(
-            content_root, index_root, query, start=start, end=end, severity=severity, limit=limit
-        )
-    except SearchError as exc:
-        click.secho(f"invalid search: {exc}", fg="red")
-        sys.exit(1)
-    except QueryTimeout as exc:
-        click.secho(str(exc), fg="red")
-        sys.exit(1)
-
-    if response.unbounded:
-        click.secho(
-            f"no date range given — scanned the full index ({response.elapsed_seconds:.2f}s)",
-            fg="yellow",
-        )
-
-    # An unbounded search is a legitimate query, not an incident — but
-    # "who searched the entire archive, and for what" is a fair question
-    # for a reviewer to be able to ask later.
-    audit = AuditLog(config.audit_dir, integrity=config.audit.integrity)
-    audit.append(
-        "ui.search",
-        actor=os.environ.get("DLPDUCK_ACTOR", getpass.getuser()),
-        **audit_terms(query, config.console.audit_search_terms, config.hmac_key()),
-        severity=severity,
-        range=[start.isoformat() if start else None, end.isoformat() if end else None],
-        unbounded=response.unbounded,
-        results=len(response.results),
-    )
-
-    if not response.results:
-        click.secho("no results", fg="green")
-        return
-
-    for r in response.results:
-        click.echo(
-            f"{r.job_id}  {r.received_at}  {r.disposition:10s} "
-            f"sev={r.highest_severity or '-':8s} hits={r.hit_count}"
-        )
-        if r.snippet:
-            click.echo(f"    ...{r.snippet}...")
-
-    click.echo("")
-    click.echo(f"{len(response.results)} result(s) in {response.elapsed_seconds:.2f}s"
-               + (" (truncated — more may exist, narrow the query or range)" if response.truncated else ""))
-
-
-@main.command()
 @click.option("--config", "config_path", required=True, type=click.Path(exists=True))
 @click.option("--apply", "do_apply", is_flag=True, default=False,
               help="Actually delete eligible partitions. Default is dry-run: report only.")
@@ -844,6 +766,13 @@ def console_run(config_path: str) -> None:
         # to the configured proxies (see ConsoleConfig.forwarded_allow_ips).
         **({"proxy_headers": True, "forwarded_allow_ips": proxies} if proxies else {}),
     )
+
+
+from dlpduck.cli_queries import correlate, jobs, search  # noqa: E402 — registered below
+
+main.add_command(search)
+main.add_command(jobs)
+main.add_command(correlate)
 
 
 if __name__ == "__main__":

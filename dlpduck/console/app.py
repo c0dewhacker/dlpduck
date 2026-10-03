@@ -34,6 +34,8 @@ from dlpduck.console.auth import (
     require_permission,
 )
 from dlpduck.console.csrf import get_csrf_token, verify_csrf
+from dlpduck.console.queries import parse_date_param, relative_url
+from dlpduck.console.queries import register as register_queries
 from dlpduck.console.rbac import ALL_ROLES, has_permission
 from dlpduck.content import InvalidJobId, has_content, read_document_text, validate_job_id
 from dlpduck.failures import FailureQueue
@@ -42,18 +44,11 @@ from dlpduck.index import AssessmentExists
 from dlpduck.masking import mask
 from dlpduck.pipeline import Pipeline
 from dlpduck.reprocess import Reprocessor, index_stats, latest_index_rows, parse_mode
-from dlpduck.search import QueryTimeout, SearchError, audit_terms
-from dlpduck.search import search as run_search
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
 
 logger = logging.getLogger("dlpduck.console")
-
-# The job list is unbounded by nature — every document ever ingested is a
-# row. Show the newest page of them and say when there are more, rather
-# than rendering a year of history into one table.
-JOBS_PAGE_SIZE = 100
 
 _FAILED_MEDIA = {
     "pdf": ("application/pdf", "pdf"),
@@ -115,22 +110,6 @@ def _first_seen(job: dict[str, Any], receipts: list[dict[str, Any]]) -> date | N
         except (KeyError, TypeError, ValueError):
             return None
     return min(dates)
-
-
-def _parse_date_param(value: str, field: str) -> date | None:
-    """Date filters arrive as raw query strings. They normally come from an
-    <input type="date">, but a bookmarked, hand-edited or truncated URL is
-    ordinary traffic too — and `date.fromisoformat` raising into the route
-    turned every one of those into a 500."""
-    if not value:
-        return None
-    try:
-        return date.fromisoformat(value)
-    except ValueError:
-        raise HTTPException(
-            status_code=400,
-            detail=f"{field}={value!r} is not a date — use YYYY-MM-DD.",
-        ) from None
 
 
 def _json_or_empty(raw: Any) -> dict[str, Any]:
@@ -295,6 +274,10 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
             return Path(archive_path).resolve().is_relative_to(quarantine_root)
         except (OSError, ValueError):
             return True  # unresolvable — fail closed
+
+    register_queries(
+        app, templates=templates, pipeline=pipeline, config=config, is_contained=_is_contained
+    )
 
     def _pdf_permission_for(job: dict[str, Any]) -> str:
         """Which permission this job's PDF needs. A quarantined document is
@@ -472,8 +455,8 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
         return templates.TemplateResponse(request, "failed.html", {
             "user": user, "items": rows[(page - 1) * 100:page * 100], "resolved": resolved,
             "csrf_token": get_csrf_token(request), "page": page,
-            "previous_url": str(request.url.include_query_params(page=page - 1)) if page > 1 else None,
-            "next_url": str(request.url.include_query_params(page=page + 1)) if len(rows) > page * 100 else None,
+            "previous_url": relative_url(request.url.include_query_params(page=page - 1)) if page > 1 else None,
+            "next_url": relative_url(request.url.include_query_params(page=page + 1)) if len(rows) > page * 100 else None,
             "flash": request.session.pop("queue_flash", None),
         })
 
@@ -817,48 +800,6 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
             pipeline.audit.append("auth.logout", actor=user.username)
         return RedirectResponse("/login?loggedout=1", status_code=303)
 
-    @app.get("/jobs", response_model=None)
-    def jobs_list(
-        request: Request,
-        disposition: str = "",
-        start: str = "",
-        end: str = "",
-        page: int = Query(1, ge=1, le=100000),
-        pending: bool = False,
-        user=Depends(require_permission("jobs.list")),
-    ) -> HTMLResponse | RedirectResponse:
-        if disposition == "failed":
-            return RedirectResponse("/failed", status_code=303)
-        if disposition not in ("", "archive", "quarantine"):
-            raise HTTPException(400, "Unknown disposition")
-        start_d = _parse_date_param(start, "start")
-        end_d = _parse_date_param(end, "end")
-        # Ask for one more than shown so "there is more" is a length check
-        # rather than a second counting query — the same trick search uses.
-        rows = latest_index_rows(
-            pipeline.index_root, start=start_d, end=end_d,
-            limit=JOBS_PAGE_SIZE + 1, newest_first=True,
-            disposition=disposition or None, release_pending=pending, offset=(page - 1) * JOBS_PAGE_SIZE,
-        )
-        truncated = len(rows) > JOBS_PAGE_SIZE
-        rows = rows[:JOBS_PAGE_SIZE]
-        return templates.TemplateResponse(
-            request,
-            "jobs_list.html",
-            {
-                "user": user,
-                "jobs": rows,
-                "truncated": truncated,
-                "page_size": JOBS_PAGE_SIZE,
-                "page": page,
-                "pending": pending,
-                "names": pipeline.operations.display_names(row["job_id"] for row in rows),
-                "previous_url": str(request.url.include_query_params(page=page - 1)) if page > 1 else None,
-                "next_url": str(request.url.include_query_params(page=page + 1)) if truncated else None,
-                "filters": {"disposition": disposition, "start": start, "end": end},
-            },
-        )
-
     @app.get("/jobs/{job_id}", response_model=None)
     def job_detail(
         request: Request,
@@ -1050,93 +991,6 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
             reprocess_result={"action": reprocess_action, "mode": mode, "outcome": outcome},
         )
 
-    @app.get("/search", response_model=None)
-    def search_page(
-        request: Request,
-        q: str = "",
-        severity: str = "",
-        start: str = "",
-        end: str = "",
-        page: int = Query(1, ge=1, le=100000),
-        user=Depends(require_permission("jobs.text.read")),
-    ) -> HTMLResponse:
-        # jobs.text.read, not jobs.list — a search result's snippet is a
-        # slice of raw full_text, the same content that gate protects
-        # everywhere else, so Viewer/Auditor don't get a search box.
-        context: dict[str, Any] = {
-            "user": user,
-            "filters": {"q": q, "severity": severity, "start": start, "end": end},
-            "response": None,
-            "error": None,
-            "page": page,
-            "previous_url": str(request.url.include_query_params(page=page - 1)) if page > 1 else None,
-            "next_url": None,
-        }
-        if q:
-            # Inline rather than a 400 page: this screen already reports a
-            # bad severity the same way, and the operator's query is right
-            # there in the form to correct.
-            try:
-                start_d = date.fromisoformat(start) if start else None
-                end_d = date.fromisoformat(end) if end else None
-            except ValueError:
-                context["error"] = "Start and end must be dates in YYYY-MM-DD form."
-                return templates.TemplateResponse(request, "search.html", context)
-            try:
-                response = run_search(
-                    pipeline.content_root,
-                    pipeline.index_root,
-                    q,
-                    start=start_d,
-                    end=end_d,
-                    severity=severity or None,
-                    offset=(page - 1) * 100,
-                )
-            except (SearchError, QueryTimeout) as exc:
-                context["error"] = str(exc)
-            else:
-                # A snippet is a raw slice of the document, so it belongs
-                # behind the same gate as opening that document. Without
-                # this, a quarantined document's PDF was admin-only while
-                # its text was searchable by any investigator — and since
-                # the snippet is centred on the match, searching a word
-                # near a hit returned the very value the quarantine, the
-                # masking, and the admin-only dlp.reveal all exist to
-                # protect. The result itself still shows (finding a
-                # quarantined document is the investigator's job); only
-                # the excerpt is withheld.
-                if not has_permission(set(user.roles), "jobs.pdf.read.quarantined"):
-                    for result in response.results:
-                        if _is_contained(result.disposition, result.archive_path):
-                            result.snippet = ""
-                            result.snippet_withheld = True
-                context["response"] = response
-                context["names"] = pipeline.operations.display_names(
-                    result.job_id for result in response.results
-                )
-                context["next_url"] = str(request.url.include_query_params(page=page + 1)) if response.truncated else None
-                # Same shape as the CLI's `dlpduck search` audit event —
-                # an unbounded search is legitimate, not an incident, but
-                # "who searched everything, and for what" stays answerable.
-                # Query recording follows console.audit_search_terms. The
-                # private default stores a keyed digest for correlation;
-                # deployments can explicitly choose readable terms.
-                pipeline.audit.append(
-                    "ui.search",
-                    actor=user.username,
-                    **audit_terms(
-                        q, config.console.audit_search_terms, pipeline.config.hmac_key()
-                    ),
-                    severity=severity or None,
-                    range=[
-                        start_d.isoformat() if start_d else None,
-                        end_d.isoformat() if end_d else None,
-                    ],
-                    unbounded=response.unbounded,
-                    results=len(response.results),
-                )
-        return templates.TemplateResponse(request, "search.html", context)
-
     @app.get("/rules", response_model=None)
     def rules_page(
         request: Request, user=Depends(require_permission("rules.read"))
@@ -1168,12 +1022,12 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
 
     def _audit_context(request: Request, user, *, start: str, end: str, before: int | None,
                        verify_result: dict[str, Any] | None = None) -> dict[str, Any]:
-        start_d = _parse_date_param(start, "start")
-        end_d = _parse_date_param(end, "end")
+        start_d = parse_date_param(start, "start")
+        end_d = parse_date_param(end, "end")
         events = pipeline.audit.events(start=start_d, end=end_d, before=before, limit=101)
         next_url = None
         if len(events) > 100:
-            next_url = str(
+            next_url = relative_url(
                 request.url.replace(path="/audit").include_query_params(before=events[99]["seq"])
             )
         return {

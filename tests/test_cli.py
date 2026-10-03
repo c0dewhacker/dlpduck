@@ -582,7 +582,7 @@ class TestCliErrorPathsExitCleanly:
             ["search", "memo", "--config", str(env["config"]), "--severity", "SEVERE"],
         )
         assert result.exit_code != 0
-        assert "invalid search" in result.output
+        assert "invalid filter" in result.output
 
     def test_verify_audit_says_so_when_chaining_is_off(self, env, runner, tmp_path):
         _ingest(env, runner)
@@ -676,3 +676,52 @@ class TestEveryCommandAppliesTheUmask:
                 continue
             mode = stat.S_IMODE(path.stat().st_mode)
             assert mode & 0o077 == 0, f"{path} is {oct(mode)}"
+
+
+class TestQueryCommands:
+    def _corpus(self, env, runner):
+        card = _ingest(env, runner, "card.pdf", ("Invoice memo", "Card 4111 1111 1111 1111"))
+        plain = _ingest(env, runner, "plain.pdf", ("Invoice draft", "nothing here"))
+        return card, plain
+
+    def test_search_filters_and_json(self, env, runner):
+        card, plain = self._corpus(env, runner)
+        result = runner.invoke(main, ["search", "invoice -draft", "--config", str(env["config"]),
+                                      "--flagged", "--json"])
+
+        assert result.exit_code == 0, result.output
+        records = [json.loads(line) for line in result.output.splitlines()]
+        assert [r["job_id"] for r in records] == [card]
+        assert "pan.generic" in records[0]["rule_ids"]
+
+    def test_an_invalid_filter_is_a_clean_error(self, env, runner):
+        result = runner.invoke(main, ["search", "x", "--config", str(env["config"]),
+                                      "--min-severity", "SEVERE"])
+        assert result.exit_code == 1
+        assert "invalid filter" in result.output
+
+    def test_jobs_lists_from_the_index(self, env, runner):
+        card, plain = self._corpus(env, runner)
+        result = runner.invoke(main, ["jobs", "--config", str(env["config"]), "--unflagged",
+                                      "--json"])
+
+        assert result.exit_code == 0, result.output
+        assert [json.loads(line)["job_id"] for line in result.output.splitlines()] == [plain]
+
+    def test_correlate_by_prompted_value(self, env, runner):
+        card, _ = self._corpus(env, runner)
+        result = runner.invoke(main, ["correlate", "--config", str(env["config"]), "--value",
+                                      "--json"], input="4111-1111-1111-1111\n")
+
+        assert result.exit_code == 0, result.output
+        records = [json.loads(line) for line in result.output.splitlines() if line.startswith("{")]
+        assert {r["job_id"] for r in records} == {card}
+        assert all("4111111111111111" not in r["masked_text"] for r in records)
+        events = _audit_events(env)
+        lookup = next(e for e in events if e["event"] == "ui.correlate_lookup")
+        assert "query" not in lookup and "4111" not in json.dumps(lookup)
+
+    def test_correlate_needs_exactly_one_way_in(self, env, runner):
+        result = runner.invoke(main, ["correlate", "--config", str(env["config"])])
+        assert result.exit_code == 1
+        assert "exactly one" in result.output

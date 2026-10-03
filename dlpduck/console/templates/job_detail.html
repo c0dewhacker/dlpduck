@@ -59,7 +59,8 @@
   <div class="hitcard sev-{{ h.severity }}">
     <div><strong>{{ h.rule_name }}</strong> <span class="chip {{ h.severity|lower }}">{{ h.severity }}</span>
       <span class="mono hit-meta">p{{ h.page_number }} L{{ h.line_number }} &middot; action={{ h.action }}</span></div>
-    <div class="hitline">{{ h.masked_text }}</div>
+    <div class="hitline">{{ h.masked_text }}
+      {% if h.match_hmac %}<a class="btn btn-ghost btn-sm" href="/correlate?hmac={{ h.match_hmac }}" title="Every document in which this same value was found">Where else?</a>{% endif %}</div>
     {% if revealed and revealed.index == loop.index0 %}
     <div class="hitline revealed">
       {% if revealed.value is not none %}revealed: {{ revealed.value }}{% else %}unable to re-derive the value — content unavailable{% endif %}

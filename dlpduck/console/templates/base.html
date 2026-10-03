@@ -334,6 +334,7 @@
       <a class="navlink {% if on_quarantine %}active{% endif %}" {% if on_quarantine %}aria-current="page"{% endif %} href="/jobs?disposition=quarantine">Quarantine</a>
       {% if has_permission(user.roles, "jobs.failed.manage") %}<a class="navlink {% if request.url.path.startswith('/failed') %}active{% endif %}" {% if request.url.path.startswith('/failed') %}aria-current="page"{% endif %} href="/failed">Needs attention</a>{% endif %}
       {% if has_permission(user.roles, "jobs.text.read") %}<a class="navlink {% if request.url.path == '/search' %}active{% endif %}" {% if request.url.path == '/search' %}aria-current="page"{% endif %} href="/search">Search</a>{% endif %}
+      {% if has_permission(user.roles, "dlp.hits.read") %}<a class="navlink {% if request.url.path == '/correlate' %}active{% endif %}" {% if request.url.path == '/correlate' %}aria-current="page"{% endif %} href="/correlate">Correlate</a>{% endif %}
       <a class="navlink {% if request.url.path == '/rules' %}active{% endif %}" {% if request.url.path == '/rules' %}aria-current="page"{% endif %} href="/rules">Rules</a>
       {% if has_permission(user.roles, "audit.read") %}<a class="navlink {% if request.url.path == '/audit' %}active{% endif %}" {% if request.url.path == '/audit' %}aria-current="page"{% endif %} href="/audit">Audit</a>{% endif %}
       {% if has_permission(user.roles, "access.write") %}<a class="navlink {% if request.url.path == '/access' %}active{% endif %}" {% if request.url.path == '/access' %}aria-current="page"{% endif %} href="/access">Access</a>{% endif %}

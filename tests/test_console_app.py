@@ -1233,7 +1233,7 @@ class TestAuditScreen:
 
         assert "Chain intact" in resp.text
         assert resp.text.count("test.filler") <= 100
-        assert 'href="http://testserver/audit?before=' in resp.text
+        assert 'href="/audit?before=' in resp.text
 
     def test_verify_action_surfaces_redactions_alongside_intact(self, env):
         """The console must not answer "Chain intact." and stop when

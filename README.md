@@ -445,8 +445,10 @@ dlpduck console run --config config.yaml
 ```
 
 Screens: Overview, Jobs, job detail (findings, receipt history, metadata,
-reveal, reprocess, purge, audit timeline), Needs attention, Search, Rules,
-Audit, Access. Overview counters link to their filtered queue; a worker card
+reveal, reprocess, purge, audit timeline), Needs attention, Search, Correlate,
+Rules, Audit, Access. Jobs, Search and Correlate share one set of filters
+(severity, rule, disposition, source, with/without hits, dates) and export
+the current result as CSV; every search, correlation and export is audited. Overview counters link to their filtered queue; a worker card
 shows watcher heartbeat, activity and drop-folder backlog.
 
 Needs attention holds refused, failed and interrupted documents — inspect,
@@ -459,8 +461,8 @@ before retrying. Failed documents follow `retention.documents_days`.
 | Permission | viewer | investigator | dlp_admin | auditor |
 |---|:--:|:--:|:--:|:--:|
 | `jobs.list`, `jobs.metadata.read`, `rules.read` | ✅ | ✅ | ✅ | ✅ |
-| `dlp.hits.read` (masked) | | ✅ | ✅ | ✅ |
-| `jobs.text.read` (search) | | ✅ | ✅ | |
+| `dlp.hits.read` (masked hits, correlation from a hit, rule filter) | | ✅ | ✅ | ✅ |
+| `jobs.text.read` (search, correlating a typed value) | | ✅ | ✅ | |
 | `jobs.pdf.read` (archived PDFs) | | ✅ | ✅ | |
 | `jobs.pdf.read.quarantined` | | | ✅ | |
 | `dlp.reveal` (cleartext) | | | ✅ | |
@@ -493,7 +495,9 @@ never document text, the PDF, or cleartext).
 | `run` | Start the watcher daemon. |
 | `scan <pdf>` | Dry-run one document; print lines and what would hit. Writes nothing. |
 | `test-rules <dir>` | Run the ruleset over a corpus and report per-rule hit counts. |
-| `search <query>` | Full-text search across the content store. |
+| `search <query>` | Full-text search: all words required, `"phrases"`, `-exclusions`; filter by severity, rule, disposition, source, hits, dates. `--json` for scripts. |
+| `jobs` | List current assessments with the same filters, from the index alone. `--json` for scripts. |
+| `correlate` | Every document holding one sensitive value — from a hit's `--hmac`, or `--value` (prompted, never on the command line). Works after content is purged. |
 | `reprocess` | Re-run the current ruleset over already-ingested jobs. Preview by default; `--commit` to apply. `--mode extract` re-runs OCR too. |
 | `release <job_id>` | Carry out a pending de-escalation (quarantine → archive). |
 | `purge-content <job_id>` | Soft purge; `--hard` also deletes the PDF. |

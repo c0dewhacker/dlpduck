@@ -91,7 +91,7 @@ ignore = [
 "tests/*" = ["S", "B011", "B017"]
 # B008 flags a function call in a default argument — which is exactly how
 # FastAPI declares Depends()/Form(), so it is the idiom here, not a bug.
-"dlpduck/console/app.py" = ["B008"]
+"dlpduck/console/*.py" = ["B008"]
 "dlpduck/cli.py" = ["B008"]
 
 [tool.mypy]

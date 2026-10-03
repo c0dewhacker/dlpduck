@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Literal
@@ -52,6 +52,7 @@ from dlpduck.durability import move_durably, write_atomically
 from dlpduck.engine import DLPEngine
 from dlpduck.index import AssessmentExists, write_row
 from dlpduck.operations import serialized
+from dlpduck.search import IndexFilters
 from dlpduck.types import (
     DLPHit,
     DocumentText,
@@ -162,6 +163,7 @@ def latest_index_rows(
     disposition: str | None = None,
     release_pending: bool = False,
     offset: int = 0,
+    filters: IndexFilters | None = None,
 ) -> list[dict]:
     """The current assessment per job — the highest assessment_seq for
     each job_id. With no is_current flag to synchronize, this remains
@@ -200,12 +202,18 @@ def latest_index_rows(
     # coming back NULL instead of the whole query failing. Without it the
     # first schema addition makes every historical row unreadable, and the
     # index is the one store that is meant to be permanent.
-    outer_filters = []
-    if disposition:
-        outer_filters.append("disposition = ?")
-        params.append(disposition)
-    if release_pending:
-        outer_filters.append("release_pending = true")
+    # Filters on the CURRENT assessment apply after the latest row per job
+    # is chosen — filtering first would surface an older assessment of a
+    # job whose newest one doesn't match.
+    filters = filters or IndexFilters()
+    if disposition or release_pending:
+        filters = replace(
+            filters,
+            disposition=disposition or filters.disposition,
+            release_pending=release_pending or filters.release_pending,
+        )
+    outer_filters, outer_params = filters.sql("cur")
+    params.extend(outer_params)
     outer_sql = "WHERE " + " AND ".join(outer_filters) if outer_filters else ""
     sql = f"""
         WITH current AS (
@@ -213,7 +221,7 @@ def latest_index_rows(
         FROM read_parquet(?, hive_partitioning = true, union_by_name = true)
         {where_sql}
         QUALIFY row_number() OVER (PARTITION BY job_id ORDER BY assessment_seq DESC) = 1
-        ) SELECT * FROM current {outer_sql}
+        ) SELECT * FROM current AS cur {outer_sql}
         ORDER BY received_at {"DESC" if newest_first else "ASC"}, job_id
         {"LIMIT ?" if limit is not None else ""}
         OFFSET ?
