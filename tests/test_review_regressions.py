@@ -362,3 +362,28 @@ def test_a_crash_between_the_completion_event_and_its_checkpoint_is_not_duplicat
 
     completed = [e for e in pipeline.audit.events_for_job(ctx.job_id) if e["event"] == "job.completed"]
     assert len(completed) == 1
+
+
+def test_a_purge_is_not_undone_by_recovering_an_interrupted_reassessment(pipeline, monkeypatch):
+    """An extract-mode reassessment that crashed leaves its transition,
+    with the re-extracted text, to finish on the next start. Purging in
+    between used to be reversed by that recovery."""
+    from dlpduck.content import has_content
+
+    ingest(pipeline)
+    prior = latest_index_rows(pipeline.index_root)[0]
+    import dlpduck.reprocess as module
+
+    original = module.write_row
+    monkeypatch.setattr(module, "write_row", Mock(side_effect=OSError("disk unavailable")))
+    with pytest.raises(OSError):
+        Reprocessor(pipeline)._write_assessment(prior, [], "archive", "changed", document("Re-extracted"))
+    monkeypatch.setattr(module, "write_row", original)
+
+    pipeline.purge_content(prior["job_id"], reason="erasure request", actor="admin")
+    Reprocessor(pipeline)  # recovers the pending transition
+
+    assert not has_content(pipeline.content_root, prior["job_id"])
+    assert latest_index_rows(pipeline.index_root)[0]["assessment_seq"] == 2
+    [purged] = [e for e in pipeline.audit.events() if e["event"] == "content.purged"]
+    assert purged["pending_transition_text_dropped"] is True

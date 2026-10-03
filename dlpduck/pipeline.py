@@ -854,6 +854,7 @@ class Pipeline:
             mode="hard" if hard else "soft",
         )
         content_removed = delete_content_file(self.content_root, job_id)
+        text_dropped = self._drop_pending_transition_text(job_id)
         document_removed = None
         if hard:
             document_removed = delete_document_file(
@@ -867,8 +868,27 @@ class Pipeline:
             mode="hard" if hard else "soft",
             content_removed=content_removed,
             document_removed=document_removed,
+            **({"pending_transition_text_dropped": True} if text_dropped else {}),
         )
         return PurgeResult(content_removed=content_removed, document_removed=document_removed)
+
+    def _drop_pending_transition_text(self, job_id: str) -> bool:
+        """An extract-mode reassessment that crashed part-way leaves its
+        transition (dlpduck.reprocess) on disk, carrying the freshly
+        extracted text, to be finished on the next start. Finishing it
+        after a purge would write that text straight back into the content
+        store — undoing the erasure with nothing recording it. The
+        assessment itself is still worth completing; only its text goes.
+        Runs under the same lock recovery does (purge is @serialized)."""
+        path = self.config.destination.work_dir / "transitions" / f"{job_id}.json"
+        if not path.is_file():
+            return False
+        payload = json.loads(path.read_text())
+        if payload.get("text") is None:
+            return False
+        payload["text"] = None
+        write_atomically(path, json.dumps(payload))
+        return True
 
     def run_job(self, pdf_path: Path, metadata_path: Path | None, staging_root: Path) -> JobContext:
         # Deliberately NOT @serialized: extraction (the slow part) used to
