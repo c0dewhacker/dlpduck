@@ -38,10 +38,11 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Literal
 
-import duckdb
-
-from dlpduck.content import read_document_text, write_content_row
+from dlpduck.content import InvalidJobId, read_document_text, validate_job_id, write_content_row
+from dlpduck.disposition import decide
 from dlpduck.index import write_index_row
+from dlpduck.reprocess import INDEX_QUERY_SECONDS
+from dlpduck.search import run_query
 from dlpduck.types import JobContext
 
 Source = Literal["content", "pdf", "failed"]
@@ -52,15 +53,12 @@ def indexed_job_ids(index_root: Path) -> set[str]:
     if not any(index_root.glob("dt=*/*.parquet")):
         return set()
     glob = str(index_root / "dt=*" / "*.parquet")
-    con = duckdb.connect()
-    try:
-        rows = con.execute(
-            "SELECT DISTINCT job_id FROM read_parquet(?, hive_partitioning = true, "
-            "union_by_name = true)",
-            [glob],
-        ).fetchall()
-    finally:
-        con.close()
+    rows = run_query(
+        "SELECT DISTINCT job_id FROM read_parquet(?, hive_partitioning = true, "
+        "union_by_name = true)",
+        [glob],
+        INDEX_QUERY_SECONDS,
+    )
     return {r[0] for r in rows}
 
 
@@ -82,6 +80,9 @@ class ReindexOutcome:
 class ReindexSummary:
     scanned_pdfs: int = 0
     already_indexed: int = 0
+    # PDFs under the archive/quarantine roots whose name is not a job id —
+    # not something this system wrote, so not something to rebuild from.
+    skipped: list[Path] = field(default_factory=list)
     outcomes: list[ReindexOutcome] = field(default_factory=list)
 
     def count(self, source: Source) -> int:
@@ -99,6 +100,7 @@ class ReindexSummary:
 class Reindexer:
     def __init__(self, pipeline):
         self.pipeline = pipeline
+        self._skipped: list[Path] = []
 
     def discover_pdfs(self) -> dict[str, Path]:
         """job_id -> archived PDF path, found by scanning the archive and
@@ -106,11 +108,19 @@ class Reindexer:
         since the filename alone (`<job_id>.pdf`) carries the identity.
         """
         out: dict[str, Path] = {}
+        self._skipped = []
         for root in (
             self.pipeline.config.destination.archive,
             self.pipeline.config.destination.quarantine,
         ):
             for path in Path(root).glob("dt=*/*.pdf"):
+                # One stray file (a copy someone made, `notes.pdf`) used to
+                # stop the whole rebuild with InvalidJobId.
+                try:
+                    validate_job_id(path.stem)
+                except InvalidJobId:
+                    self._skipped.append(path)
+                    continue
                 out[path.stem] = path
         return out
 
@@ -145,7 +155,9 @@ class Reindexer:
         already = indexed_job_ids(self.pipeline.index_root)
         pdfs = self.discover_pdfs()
         purged = self.purged_job_ids()
-        summary = ReindexSummary(scanned_pdfs=len(pdfs), already_indexed=0)
+        summary = ReindexSummary(
+            scanned_pdfs=len(pdfs), already_indexed=0, skipped=list(self._skipped)
+        )
 
         for job_id, pdf_path in sorted(pdfs.items()):
             if job_id in already:
@@ -189,7 +201,10 @@ class Reindexer:
         except Exception as exc:
             return ReindexOutcome(job_id, "failed", written=False, detail=str(exc))
 
-        degraded = text.degraded if source == "pdf" else False  # see module docstring
+        if source == "content":
+            # See the module docstring: whether the original extraction was
+            # degraded is not recoverable from content alone.
+            text.degraded = False
         # WHERE the PDF sits is a surviving record of the disposition that
         # was decided for it, exactly as its dt= partition is a surviving
         # record of when it arrived. A rebuild restores that record; it
@@ -207,8 +222,10 @@ class Reindexer:
         located_disposition = (
             "quarantine" if self._is_in_quarantine(pdf_path) else "archive"
         )
-        ruleset_disposition = (
-            "quarantine" if degraded or any(h.action == "quarantine" for h in hits) else "archive"
+        # The same policy as ingest and reprocess, quarantine_on_degraded
+        # included — this used to be its own copy, which ignored that flag.
+        ruleset_disposition, _ = decide(
+            text, hits, self.pipeline.config.dlp.quarantine_on_degraded
         )
         disposition = located_disposition
         disagrees = ruleset_disposition != located_disposition

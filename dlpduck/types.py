@@ -29,16 +29,6 @@ _RANK = {
     Severity.CRITICAL: 4,
 }
 
-# quarantine > flag > ignore
-_ACTION_RANK = {"ignore": 0, "flag": 1, "quarantine": 2}
-
-
-def strongest_action(actions: list[str]) -> str:
-    if not actions:
-        return "ignore"
-    return max(actions, key=lambda a: _ACTION_RANK[a])
-
-
 @dataclass(frozen=True)
 class TextLine:
     line_number: int  # 0-indexed, document-global
@@ -66,6 +56,31 @@ class DLPHit:
     validator: str | None = None
 
 
+# Every DLPHit field, in the order the index schema stores them. Nothing
+# here is a raw matched value — DLPHit has no field for one.
+HIT_FIELDS = (
+    "rule_id", "rule_name", "severity", "action", "page_number", "line_number",
+    "line_on_page", "start", "end", "masked_text", "match_hmac", "validator",
+)
+# What a SIEM sink receives per hit (positions within a line are of no use
+# to it), and what the job.completed audit event keeps.
+SINK_HIT_FIELDS = (
+    "rule_id", "rule_name", "severity", "action", "page_number", "line_number",
+    "masked_text", "match_hmac", "validator",
+)
+AUDIT_HIT_FIELDS = ("rule_id", "severity", "page_number", "line_number", "masked_text")
+
+
+def hit_record(hit: DLPHit, fields: tuple[str, ...] = HIT_FIELDS) -> dict[str, Any]:
+    """A hit as plain data, severity as its string value. The one place a
+    DLPHit is serialised — the index row, a reassessment, the audit event
+    and the sinks each kept their own copy of this, and they drift."""
+    return {
+        name: (hit.severity.value if name == "severity" else getattr(hit, name))
+        for name in fields
+    }
+
+
 @dataclass
 class DocumentText:
     lines: list[TextLine] = field(default_factory=list)
@@ -73,6 +88,7 @@ class DocumentText:
     ocr_page_count: int = 0
     degraded: bool = False  # any page failed extraction -> fail closed
     failed_page_count: int = 0  # pages that raised, distinct from valid empty OCR
+    blank_page_count: int = 0  # pages OCR read nothing from AND carry no ink — not degraded
 
     def add_line(self, line: TextLine) -> None:
         self.lines.append(line)
@@ -151,6 +167,15 @@ class EncryptedDocument(Exception):
 
 class DocumentTooLarge(Exception):
     """Raised at claim time when limits.max_bytes or limits.max_pages is exceeded."""
+
+
+class TooManyPages(Exception):
+    """Raised by extraction when a document has more pages than
+    limits.max_pages — checked on open, before any page is rendered."""
+
+    def __init__(self, page_count: int):
+        super().__init__(f"document has {page_count} pages")
+        self.page_count = page_count
 
 
 class PageTooLarge(Exception):

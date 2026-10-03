@@ -279,10 +279,20 @@ class AuditLog:
         # Resume from the last record that actually parses. A half-written
         # trailing line is exactly what an unclean shutdown leaves, and it
         # must not stop the daemon coming back up.
-        event = _last_parseable_event(files[-1])
-        if event is None:
-            return 0, None
-        return event.get("seq", 0), event.get("hash")
+        #
+        # Walked back across partitions, not just the newest: a crash during
+        # the first write of a new day leaves a partition holding nothing
+        # parseable, and treating that as "no history" restarted seq at 1
+        # and the chain at None — duplicate sequence numbers and a
+        # verify-audit break that no tampering caused.
+        for path in reversed(files):
+            event = _last_parseable_event(path)
+            if event is not None:
+                return event.get("seq", 0), event.get("hash")
+        checkpoint = self._read_checkpoint()
+        if checkpoint:
+            return checkpoint["seq"], checkpoint["hash"]
+        return 0, None
 
     @contextmanager
     def _appending(self) -> Iterator[None]:
@@ -343,7 +353,11 @@ class AuditLog:
             partition = self.root / f"dt={now.date().isoformat()}"
             partition.mkdir(parents=True, exist_ok=True)
             path = partition / "events.jsonl"
-            with open(path, "a", encoding="utf-8") as f:
+            # Created owner-only whatever the process umask: the trail
+            # holds actor names, filenames and (in plain mode) search
+            # terms, and has no purge path.
+            fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+            with os.fdopen(fd, "a", encoding="utf-8") as f:
                 f.write(_canonical(event) + "\n")
                 f.flush()
                 os.fsync(f.fileno())
@@ -437,10 +451,14 @@ class AuditLog:
                         return path, line_no, event
         raise KeyError(f"no audit event with seq {seq}")
 
-    def events_for_job(self, job_id: str) -> list[dict[str, Any]]:
+    def events_for_job(self, job_id: str, since: date | None = None) -> list[dict[str, Any]]:
         """Every event mentioning this job, oldest first — the console's
-        job-detail timeline. A linear scan of every partition; fine at
-        MFP volumes, the first thing to revisit if this ever isn't.
+        job-detail timeline. A linear scan of every partition from `since`
+        onward (all of them when None).
+
+        Callers that know when the job first arrived pass that date: no
+        event can name a job before its first receipt, and the partitions
+        before it are, for an old trail, nearly all of it.
         """
         # A job's events can be spread across any partition — a purge or a
         # reassessment lands years after ingest — so this genuinely has to
@@ -452,7 +470,10 @@ class AuditLog:
         # cannot possibly match.
         needle = f'"{job_id}"'
         out: list[dict[str, Any]] = []
+        floor = f"dt={since.isoformat()}" if since is not None else ""
         for path in self._partition_files():
+            if path.parent.name < floor:
+                continue
             with open(path, encoding="utf-8") as f:
                 for line_no, raw in enumerate(f, start=1):
                     if needle not in raw:

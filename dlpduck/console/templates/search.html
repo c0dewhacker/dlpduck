@@ -3,17 +3,22 @@
 {% block content %}
 <div class="pagehead"><h1>Search</h1></div>
 <form class="filters" method="get" action="/search">
-  <div class="filter-field"><label for="q">Search document text</label><input id="q" type="text" name="q" value="{{ filters.q or '' }}" placeholder="search text..." style="flex:1;min-width:220px;"></div>
-  <div class="filter-field"><label for="severity">Severity</label><select id="severity" name="severity">
-    <option value="">any severity</option>
-    {% for s in ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"] %}
-    <option value="{{ s }}" {% if filters.severity == s %}selected{% endif %}>{{ s }}</option>
+  <div class="filter-field"><label for="q">Search document text</label><input id="q" type="text" name="q" value="{{ filters.q or '' }}" placeholder='invoice "account number" -draft' maxlength="256" style="flex:1;min-width:260px;"></div>
+  <div class="filter-field"><label for="disposition">Disposition</label><select id="disposition" name="disposition">
+    <option value="">any</option>
+    {% for d in ["archive", "quarantine"] %}
+    <option value="{{ d }}" {% if filters.disposition == d %}selected{% endif %}>{{ d }}</option>
     {% endfor %}
   </select></div>
+  {% include "_index_filters.html" %}
+  {% if filters.severity %}<input type="hidden" name="severity" value="{{ filters.severity }}">{% endif %}
   <div class="filter-field"><label for="start">From (UTC)</label><input id="start" type="date" name="start" value="{{ filters.start or '' }}"></div>
   <div class="filter-field"><label for="end">Through (UTC)</label><input id="end" type="date" name="end" value="{{ filters.end or '' }}"></div>
   <button type="submit" class="btn btn-primary">Search</button>
+  {% if response and response.results %}<a class="btn btn-ghost" href="{{ export_url }}">Export CSV</a>{% endif %}
 </form>
+<p class="note">Every word must appear; <span class="mono">"quoted phrases"</span> match together, even across a line break; <span class="mono">-word</span> excludes. Case is ignored.
+  To find every document holding one specific value, use <a href="/correlate">Correlate</a>.</p>
 
 {% if error %}
 <p class="note" style="color:var(--crit);">{{ error }}</p>

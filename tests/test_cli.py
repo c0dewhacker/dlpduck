@@ -121,6 +121,24 @@ class TestScan:
             (env["tmp"] / "archive").glob("dt=*/*.pdf")
         )
 
+    def test_a_scanner_image_is_scanned_like_a_pdf(self, env, runner):
+        from tests.test_images import _scanned_tiff
+
+        scan = env["tmp"] / "card.tif"
+        scan.write_bytes(_scanned_tiff(["Card 4111 1111 1111 1111"]))
+        result = runner.invoke(main, ["scan", str(scan), "--config", str(env["config"])])
+
+        assert result.exit_code == 0, result.output
+        assert "pan.generic" in result.output
+
+    def test_an_unreadable_image_is_reported_as_refused(self, env, runner):
+        scan = env["tmp"] / "broken.png"
+        scan.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
+        result = runner.invoke(main, ["scan", str(scan), "--config", str(env["config"])])
+
+        assert result.exit_code == 1
+        assert "refused at claim" in result.output
+
     def test_clean_document_reports_no_hits(self, env, runner):
         pdf = _pdf(env["tmp"] / "clean.pdf", ["An ordinary memo about lunch."])
         result = runner.invoke(main, ["scan", str(pdf), "--config", str(env["config"])])
@@ -493,7 +511,7 @@ class TestTestRulesCommand:
             main, ["test-rules", "--corpus", str(empty), "--config", str(env["config"])]
         )
         assert result.exit_code == 1
-        assert "no .pdf files" in result.output
+        assert "no documents found" in result.output
 
     def test_an_unreadable_document_is_skipped_not_fatal(self, env, runner, tmp_path):
         corpus = tmp_path / "corpus"
@@ -564,7 +582,7 @@ class TestCliErrorPathsExitCleanly:
             ["search", "memo", "--config", str(env["config"]), "--severity", "SEVERE"],
         )
         assert result.exit_code != 0
-        assert "invalid search" in result.output
+        assert "invalid filter" in result.output
 
     def test_verify_audit_says_so_when_chaining_is_off(self, env, runner, tmp_path):
         _ingest(env, runner)
@@ -618,3 +636,92 @@ class TestCliErrorPathsExitCleanly:
         result = runner.invoke(main, ["validate-config", "--config", str(config)])
 
         assert result.exit_code == 0, result.output
+
+
+class TestConsoleRunTrustsConfiguredProxies:
+    def test_forwarded_allow_ips_reaches_uvicorn(self, env, runner, monkeypatch):
+        import uvicorn
+
+        monkeypatch.setenv("DLPDUCK_SESSION_SECRET", "test-session-secret")
+        monkeypatch.setenv("DLPDUCK__CONSOLE__FORWARDED_ALLOW_IPS", "10.42.0.0/16")
+        seen = {}
+        monkeypatch.setattr(uvicorn, "run", lambda app, **kwargs: seen.update(kwargs))
+
+        result = runner.invoke(main, ["console", "run", "--config", str(env["config"])])
+
+        assert result.exit_code == 0, result.output
+        assert seen["proxy_headers"] is True
+        assert seen["forwarded_allow_ips"] == "10.42.0.0/16"
+
+
+class TestEveryCommandAppliesTheUmask:
+    """Only `run` and `console run` used to. From a shell with umask 0022,
+    `dlpduck search` created the day's audit file world-readable."""
+
+    def test_search_writes_owner_only_files(self, env, runner):
+        import os
+        import stat
+
+        _ingest(env, runner)
+        shutil.rmtree(env["tmp"] / "work" / "audit")  # only what search itself creates
+        previous = os.umask(0o022)
+        try:
+            result = runner.invoke(main, ["search", "memo", "--config", str(env["config"])])
+        finally:
+            os.umask(previous)
+
+        assert result.exit_code == 0, result.output
+        for path in (env["tmp"] / "work" / "audit").rglob("*"):
+            if path.name.startswith("."):
+                continue
+            mode = stat.S_IMODE(path.stat().st_mode)
+            assert mode & 0o077 == 0, f"{path} is {oct(mode)}"
+
+
+class TestQueryCommands:
+    def _corpus(self, env, runner):
+        card = _ingest(env, runner, "card.pdf", ("Invoice memo", "Card 4111 1111 1111 1111"))
+        plain = _ingest(env, runner, "plain.pdf", ("Invoice draft", "nothing here"))
+        return card, plain
+
+    def test_search_filters_and_json(self, env, runner):
+        card, plain = self._corpus(env, runner)
+        result = runner.invoke(main, ["search", "invoice -draft", "--config", str(env["config"]),
+                                      "--flagged", "--json"])
+
+        assert result.exit_code == 0, result.output
+        records = [json.loads(line) for line in result.output.splitlines()]
+        assert [r["job_id"] for r in records] == [card]
+        assert "pan.generic" in records[0]["rule_ids"]
+
+    def test_an_invalid_filter_is_a_clean_error(self, env, runner):
+        result = runner.invoke(main, ["search", "x", "--config", str(env["config"]),
+                                      "--min-severity", "SEVERE"])
+        assert result.exit_code == 1
+        assert "invalid filter" in result.output
+
+    def test_jobs_lists_from_the_index(self, env, runner):
+        card, plain = self._corpus(env, runner)
+        result = runner.invoke(main, ["jobs", "--config", str(env["config"]), "--unflagged",
+                                      "--json"])
+
+        assert result.exit_code == 0, result.output
+        assert [json.loads(line)["job_id"] for line in result.output.splitlines()] == [plain]
+
+    def test_correlate_by_prompted_value(self, env, runner):
+        card, _ = self._corpus(env, runner)
+        result = runner.invoke(main, ["correlate", "--config", str(env["config"]), "--value",
+                                      "--json"], input="4111-1111-1111-1111\n")
+
+        assert result.exit_code == 0, result.output
+        records = [json.loads(line) for line in result.output.splitlines() if line.startswith("{")]
+        assert {r["job_id"] for r in records} == {card}
+        assert all("4111111111111111" not in r["masked_text"] for r in records)
+        events = _audit_events(env)
+        lookup = next(e for e in events if e["event"] == "ui.correlate_lookup")
+        assert "query" not in lookup and "4111" not in json.dumps(lookup)
+
+    def test_correlate_needs_exactly_one_way_in(self, env, runner):
+        result = runner.invoke(main, ["correlate", "--config", str(env["config"])])
+        assert result.exit_code == 1
+        assert "exactly one" in result.output

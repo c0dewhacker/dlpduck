@@ -22,7 +22,7 @@ import json
 import logging
 import shutil
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from dlpduck.audit import AuditLog
@@ -75,7 +75,9 @@ def eligible_failures(root: Path, cutoff: date) -> list[Path]:
 
 
 def plan_retention(config: Config, today: date | None = None) -> list[RetentionPlan]:
-    today = today or date.today()
+    # UTC, like every dt= partition: the host's local date is a day off
+    # for part of every day anywhere east or west of UTC.
+    today = today or datetime.now(UTC).date()
     r = config.retention
 
     def cutoff_for(days: int | None) -> date | None:

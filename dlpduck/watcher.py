@@ -12,18 +12,15 @@ Pipeline.claim() still derives what it can from the PDF itself.
 
 from __future__ import annotations
 
-import json
 import logging
 import threading
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 
+from dlpduck import heartbeat
 from dlpduck.config import Config
-from dlpduck.durability import write_atomically
-from dlpduck.pipeline import Pipeline
-from dlpduck.types import DocumentTooLarge, UnsafeSourceFile
+from dlpduck.pipeline import CLAIM_REFUSALS, Pipeline
 
 logger = logging.getLogger("dlpduck.watcher")
 
@@ -53,13 +50,27 @@ class Watcher:
         # always — see cluster.parallel_extraction. True: claim only,
         # and leave extraction to a sweep (cli.py's run command).
         self._claim_only = claim_only
+        self._identity = heartbeat.instance_identity(config.cluster.identity)
 
     def _heartbeat(self):
-        write_atomically(self.config.destination.work_dir / "watcher.json", json.dumps({
-            "updated_at": datetime.now(UTC).isoformat(), "state": self._state,
+        heartbeat.write(self.config.destination.work_dir, self._identity, {
+            "state": self._state,
             "current_job": self._current,
-            "backlog": sum(1 for _ in self.config.source.path.glob(f"*{self.config.source.pdf_suffix}")),
-        }))
+            "backlog": len(self._candidates()),
+        })
+
+    def _candidates(self, listing: dict[str, Path] | None = None) -> list[Path]:
+        """Every file in the drop folder this source picks up — PDFs and
+        scanner images, with the suffix matched regardless of case."""
+        entries = listing.values() if listing is not None else self.config.source.path.iterdir()
+        return sorted(p for p in entries if self.config.source.accepts(p.name))
+
+    def _companion(self, document: Path, listing: dict[str, Path]) -> Path | None:
+        """The metadata file beside `document`: same stem, metadata_suffix,
+        matched without regard to case (SCAN.PDF with SCAN.XML)."""
+        wanted = (document.stem + self.config.source.metadata_suffix).lower()
+        candidate = listing.get(wanted)
+        return candidate if candidate is not None and candidate.is_file() else None
 
     def discover_ready(self) -> list[tuple[Path, Path | None]]:
         """One poll: update size-stability tracking for every candidate PDF
@@ -72,8 +83,9 @@ class Watcher:
         cfg = self.config.source
         ready: list[tuple[Path, Path | None]] = []
         seen_this_poll: set[Path] = set()
+        listing = {p.name.lower(): p for p in src.iterdir()}
 
-        for pdf_path in sorted(src.glob(f"*{cfg.pdf_suffix}")):
+        for pdf_path in self._candidates(listing):
             seen_this_poll.add(pdf_path)
             try:
                 size = pdf_path.stat().st_size
@@ -96,8 +108,8 @@ class Watcher:
 
             meta_path: Path | None = None
             if cfg.metadata_format != "none":
-                candidate = pdf_path.with_suffix(cfg.metadata_suffix)
-                if candidate.is_file():
+                candidate = self._companion(pdf_path, listing)
+                if candidate is not None:
                     meta_path = candidate
                 else:
                     tracked.grace_polls += 1
@@ -163,7 +175,7 @@ class Watcher:
                             self._state, self._current = "Processing", pdf_path.name
                             ctx = self.pipeline.run_job(pdf_path, meta_path, self.staging_root)
                             logger.info("job %s -> %s", ctx.job_id, ctx.disposition)
-                    except (DocumentTooLarge, UnsafeSourceFile) as exc:
+                    except CLAIM_REFUSALS as exc:
                         # run_job has already moved it to failed/ and
                         # audited the refusal (stage() never raises these
                         # at all — see its own docstring). Logged at
@@ -174,7 +186,8 @@ class Watcher:
                         # Anything else really is unhandled. The file is
                         # either still in the drop folder (retried next
                         # poll, right for a transient fault) or already
-                        # staged, where a sweep will find it.
+                        # staged, where the periodic sweep (cli.run) will
+                        # pick it up once it is clearly not in flight.
                         logger.exception("unhandled error processing %s", pdf_path)
             # Waiting on the event rather than sleeping blindly: a SIGTERM
             # arriving one second into a 30-second poll should not hold

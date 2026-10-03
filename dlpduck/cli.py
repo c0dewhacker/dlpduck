@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import getpass
 import logging
-import os
 import signal
 import sys
 import threading
@@ -18,15 +17,14 @@ from dlpduck.config import ConfigError, config_warnings, load_config, validate_c
 from dlpduck.content import InvalidJobId
 from dlpduck.engine import DLPEngine
 from dlpduck.extract import LineExtractor
+from dlpduck.images import UnreadableImage
 from dlpduck.index import AssessmentExists, compact_partition, plan_compaction
 from dlpduck.leader import build_leader_election
 from dlpduck.pipeline import Pipeline
 from dlpduck.reprocess import Reprocessor, parse_mode
 from dlpduck.retention import apply_retention, plan_retention
-from dlpduck.search import QueryTimeout, SearchError, audit_terms
-from dlpduck.search import search as run_search
 from dlpduck.tracing import configure_logging
-from dlpduck.types import EncryptedDocument, RuleBudgetExceeded
+from dlpduck.types import DocumentTooLarge, EncryptedDocument, RuleBudgetExceeded
 from dlpduck.watcher import Watcher
 
 configure_logging()
@@ -48,6 +46,45 @@ def _parse_date_option(value: str | None, flag: str) -> date | None:
     except ValueError:
         click.secho(f"{flag} must be a date in YYYY-MM-DD form, got {value!r}", fg="red")
         sys.exit(1)
+
+
+def _load(config_path: str):
+    """Load config and apply its umask before the command writes anything.
+
+    Only `run` and `console run` used to do this, but nearly every command
+    writes: `search` appends to the audit trail (creating the day's file if
+    it is the first event), `reprocess --commit` and `release` move PDFs and
+    write index rows, `purge-content`, `retention --apply`, `reindex` and
+    `redact-audit` all write too. Run from a shell with the usual 0022, each
+    of those created world-readable files in stores the config says are
+    owner-only.
+    """
+    config = load_config(config_path)
+    config.apply_umask()
+    return config
+
+
+def _document_bytes(path: Path, config) -> bytes:
+    """A document as the pipeline would store it: PDF bytes, with a
+    scanner image converted first (in the isolated worker when extraction
+    is isolated), so `scan` and `test-rules` see what ingest would."""
+    from dlpduck.extract_worker import convert_isolated
+    from dlpduck.images import IMAGE_FORMATS, image_to_pdf, sniff
+
+    data = path.read_bytes()
+    if sniff(data) not in IMAGE_FORMATS:
+        return data
+    if config.extraction.isolate_worker:
+        return convert_isolated(
+            data,
+            max_pages=config.limits.max_pages,
+            max_pixels=config.limits.max_image_pixels,
+            timeout=config.extraction.timeout_seconds,
+            memory_mb=config.extraction.worker_memory_mb,
+        )
+    return image_to_pdf(
+        data, max_pages=config.limits.max_pages, max_pixels=config.limits.max_image_pixels
+    )
 
 
 @main.command("validate-config")
@@ -79,13 +116,16 @@ def validate_config_cmd(config_path: str) -> None:
 @click.argument("pdf_path", type=click.Path(exists=True))
 @click.option("--config", "config_path", required=True, type=click.Path(exists=True))
 def scan(pdf_path: str, config_path: str) -> None:
-    """Dry run one document: print extracted lines with page/line indices
+    """Dry run one document (PDF, or a TIFF/JPEG/PNG scan): print extracted lines with page/line indices
     and every hit. Nothing is written."""
-    config = load_config(config_path)
+    config = _load(config_path)
     extractor = LineExtractor(
         dpi=config.extraction.dpi,
         isolate=config.extraction.isolate_worker,
         timeout=config.extraction.timeout_seconds,
+        max_pages=config.limits.max_pages,
+        memory_mb=config.extraction.worker_memory_mb,
+        blank_max_ink=config.extraction.blank_page_max_ink,
     )
     extractor.NATIVE_MIN_CHARS = config.extraction.native_min_chars
     engine = DLPEngine(
@@ -94,11 +134,13 @@ def scan(pdf_path: str, config_path: str) -> None:
         rule_budget_seconds=config.rule_budget_seconds,
     )
 
-    pdf_bytes = Path(pdf_path).read_bytes()
     try:
-        text = extractor.extract(pdf_bytes)
+        text = extractor.extract(_document_bytes(Path(pdf_path), config))
     except EncryptedDocument:
         click.secho("document is encrypted — would fail closed", fg="red")
+        sys.exit(1)
+    except (DocumentTooLarge, UnreadableImage) as exc:
+        click.secho(f"{exc} — would be refused at claim", fg="red")
         sys.exit(1)
 
     click.echo(f"{text.page_count} pages, {text.ocr_page_count} via OCR, degraded={text.degraded}")
@@ -136,11 +178,14 @@ def scan(pdf_path: str, config_path: str) -> None:
 def test_rules(corpus: str, config_path: str, rule_id: str | None) -> None:
     """Run the ruleset over a directory of real documents; print per-rule
     hit counts and matching lines for false-positive tuning."""
-    config = load_config(config_path)
+    config = _load(config_path)
     extractor = LineExtractor(
         dpi=config.extraction.dpi,
         isolate=config.extraction.isolate_worker,
         timeout=config.extraction.timeout_seconds,
+        max_pages=config.limits.max_pages,
+        memory_mb=config.extraction.worker_memory_mb,
+        blank_max_ink=config.extraction.blank_page_max_ink,
     )
     extractor.NATIVE_MIN_CHARS = config.extraction.native_min_chars
     engine = DLPEngine(
@@ -151,15 +196,15 @@ def test_rules(corpus: str, config_path: str, rule_id: str | None) -> None:
 
     counts: Counter[str] = Counter()
     samples: dict[str, list[str]] = {}
-    pdfs = sorted(Path(corpus).glob("*.pdf"))
+    pdfs = sorted(p for p in Path(corpus).iterdir() if config.source.accepts(p.name))
     if not pdfs:
-        click.secho(f"no .pdf files found under {corpus}", fg="red")
+        click.secho(f"no documents found under {corpus}", fg="red")
         sys.exit(1)
 
     with click.progressbar(pdfs, label="scanning corpus") as bar:
         for pdf_path in bar:
             try:
-                text = extractor.extract(pdf_path.read_bytes())
+                text = extractor.extract(_document_bytes(pdf_path, config))
                 hits = engine.scan(text)
             except Exception as exc:
                 click.echo(f"\n  skipped {pdf_path.name}: {exc}")
@@ -184,7 +229,7 @@ def test_rules(corpus: str, config_path: str, rule_id: str | None) -> None:
 @click.option("--config", "config_path", required=True, type=click.Path(exists=True))
 def replay_sink(sink_name: str, config_path: str) -> None:
     """Drain a sink's spool in order. Safe to run while the daemon is live."""
-    config = load_config(config_path)
+    config = _load(config_path)
     plugins = config.load_plugins()
     target = next((p for p in plugins if p.name == sink_name), None)
     if target is None or not hasattr(target, "replay"):
@@ -227,7 +272,7 @@ def reprocess(
     immediately. De-escalations are recorded with release_pending, but
     the PDF is deliberately left where it is — release it with
     `dlpduck release <job_id>`."""
-    config = load_config(config_path)
+    config = _load(config_path)
     pipeline = Pipeline(config)
     reprocessor = Reprocessor(pipeline)
 
@@ -254,6 +299,8 @@ def reprocess(
     click.echo(f"  de-escalated (release pending):  {summary.count('deescalate')}")
     click.echo(f"  changed (disposition same):      {summary.count('changed')}")
     click.echo(f"  unavailable (content purged):    {summary.count('content_unavailable')}")
+    if summary.count("error"):
+        click.secho(f"  could not be reassessed:         {summary.count('error')}", fg="red")
     click.echo(f"  unchanged:                        {summary.unchanged}")
 
     if do_commit:
@@ -280,6 +327,7 @@ def reprocess(
             f"  [{outcome.direction:20s}] {outcome.job_id}  "
             f"{outcome.old_disposition or '-':10s} -> {outcome.new_disposition or '-':10s}  "
             f"hits {outcome.old_hit_count} -> {outcome.new_hit_count}"
+            + (f"  ({outcome.detail})" if outcome.detail else "")
         )
 
 
@@ -295,7 +343,7 @@ def release(job_id: str, config_path: str, reason: str, actor: str | None) -> No
     the PDF from quarantine into the archive. Only works on a job whose
     current assessment has release_pending set — reprocess's verdict is
     not reconsidered here, only executed."""
-    config = load_config(config_path)
+    config = _load(config_path)
     pipeline = Pipeline(config)
     result = Reprocessor(pipeline).release(job_id, reason=reason, actor=actor or getpass.getuser())
 
@@ -329,7 +377,7 @@ def purge_content_cmd(
 
     By default the archived PDF is left in place. Pass --hard to delete it
     too."""
-    config = load_config(config_path)
+    config = _load(config_path)
     pipeline = Pipeline(config)
     try:
         result = pipeline.purge_content(
@@ -356,81 +404,6 @@ def purge_content_cmd(
 
 
 @main.command()
-@click.argument("query")
-@click.option("--config", "config_path", required=True, type=click.Path(exists=True))
-@click.option("--start", "start_str", default=None, help="YYYY-MM-DD, inclusive")
-@click.option("--end", "end_str", default=None, help="YYYY-MM-DD, inclusive")
-@click.option("--severity", default=None, help="INFO|LOW|MEDIUM|HIGH|CRITICAL")
-@click.option("--limit", default=100, help="Max results (default 100)")
-def search(
-    query: str,
-    config_path: str,
-    start_str: str | None,
-    end_str: str | None,
-    severity: str | None,
-    limit: int,
-) -> None:
-    """Full-text search, joining the content store against the metadata
-    index. The date range is optional — omit it to search everything, at
-    the cost of a full scan. A job whose content has been purged
-    (see `purge-content`) never matches, even though its index row and
-    audit trail still exist."""
-    config = load_config(config_path)
-    content_root = config.destination.work_dir / "content"
-    index_root = config.destination.work_dir / "index"
-
-    start = _parse_date_option(start_str, "--start")
-    end = _parse_date_option(end_str, "--end")
-
-    try:
-        response = run_search(
-            content_root, index_root, query, start=start, end=end, severity=severity, limit=limit
-        )
-    except SearchError as exc:
-        click.secho(f"invalid search: {exc}", fg="red")
-        sys.exit(1)
-    except QueryTimeout as exc:
-        click.secho(str(exc), fg="red")
-        sys.exit(1)
-
-    if response.unbounded:
-        click.secho(
-            f"no date range given — scanned the full index ({response.elapsed_seconds:.2f}s)",
-            fg="yellow",
-        )
-
-    # An unbounded search is a legitimate query, not an incident — but
-    # "who searched the entire archive, and for what" is a fair question
-    # for a reviewer to be able to ask later.
-    audit = AuditLog(config.audit_dir, integrity=config.audit.integrity)
-    audit.append(
-        "ui.search",
-        actor=os.environ.get("DLPDUCK_ACTOR", getpass.getuser()),
-        **audit_terms(query, config.console.audit_search_terms, config.hmac_key()),
-        severity=severity,
-        range=[start.isoformat() if start else None, end.isoformat() if end else None],
-        unbounded=response.unbounded,
-        results=len(response.results),
-    )
-
-    if not response.results:
-        click.secho("no results", fg="green")
-        return
-
-    for r in response.results:
-        click.echo(
-            f"{r.job_id}  {r.received_at}  {r.disposition:10s} "
-            f"sev={r.highest_severity or '-':8s} hits={r.hit_count}"
-        )
-        if r.snippet:
-            click.echo(f"    ...{r.snippet}...")
-
-    click.echo("")
-    click.echo(f"{len(response.results)} result(s) in {response.elapsed_seconds:.2f}s"
-               + (" (truncated — more may exist, narrow the query or range)" if response.truncated else ""))
-
-
-@main.command()
 @click.option("--config", "config_path", required=True, type=click.Path(exists=True))
 @click.option("--apply", "do_apply", is_flag=True, default=False,
               help="Actually delete eligible partitions. Default is dry-run: report only.")
@@ -438,7 +411,7 @@ def retention(config_path: str, do_apply: bool) -> None:
     """Drop whole dt= partitions past each store's configured retention
     window. A store with no window configured is never touched.
     Dry run by default."""
-    config = load_config(config_path)
+    config = _load(config_path)
     plans = plan_retention(config)
 
     any_configured = any(p.cutoff is not None for p in plans)
@@ -495,7 +468,7 @@ def redact_audit_cmd(
     as a chained event naming you and your reason, so this removes
     evidence but never silently.
     """
-    config = load_config(config_path)
+    config = _load(config_path)
     audit = AuditLog(config.audit_dir, integrity=config.audit.integrity)
     try:
         event = audit.redact(
@@ -525,9 +498,10 @@ def compact_index(config_path: str, do_commit: bool) -> None:
     completed days; today's partition is left alone because it is still
     being written.
 
-    Safe to run against a live system, and safe to interrupt.
+    Safe to run against a live system (each partition is merged under the
+    same write lock ingest and reprocessing take), and safe to interrupt.
     """
-    config = load_config(config_path)
+    config = _load(config_path)
     plans = plan_compaction(config.destination.work_dir / "index")
     if not plans:
         click.secho("nothing to compact — every past partition is already one file", fg="green")
@@ -549,7 +523,7 @@ def compact_index(config_path: str, do_commit: bool) -> None:
     reclaimed = 0
     with click.progressbar(plans, label="compacting") as bar:
         for plan in bar:
-            reclaimed += compact_partition(plan)
+            reclaimed += compact_partition(plan, lock_root=config.destination.work_dir)
     click.secho(
         f"merged {total_files} file(s) into {len(plans)}, reclaimed {reclaimed / 1e6:.1f} MB",
         fg="green",
@@ -560,7 +534,7 @@ def compact_index(config_path: str, do_commit: bool) -> None:
 @click.option("--config", "config_path", required=True, type=click.Path(exists=True))
 def verify_audit_cmd(config_path: str) -> None:
     """Walk the hash chain and report the first break, if any."""
-    config = load_config(config_path)
+    config = _load(config_path)
     audit = AuditLog(config.audit_dir, integrity=config.audit.integrity)
     if audit.integrity == "none":
         click.secho("audit.integrity is 'none' — chaining is off, nothing to verify", fg="yellow")
@@ -613,28 +587,42 @@ def run(config_path: str) -> None:
     election = build_leader_election(config.cluster)
     election.start()
 
-    sweep_thread = None
     if config.cluster.parallel_extraction:
         # Runs on every replica, leader or not: each staged job is
         # protected by its own file lock (see Pipeline.job_lock), so this
         # is what actually spreads extraction across replicas. Claiming
         # new arrivals is the only part that needs a single leader.
-        def sweep_forever() -> None:
-            while not stop_event.is_set():
-                try:
-                    resumed = pipeline.resume_staged(staging_root)
-                    if resumed:
-                        log.info("processed %d staged job(s)", len(resumed))
-                except Exception:
-                    log.exception("extraction sweep failed")
-                stop_event.wait(config.cluster.sweep_interval_seconds)
-
-        sweep_thread = threading.Thread(target=sweep_forever, name="extraction-sweep", daemon=True)
-        sweep_thread.start()
+        sweep_interval = config.cluster.sweep_interval_seconds
+        min_age = 0.0
     else:
         resumed = pipeline.resume_staged(staging_root)
         if resumed:
             log.info("resumed %d interrupted job(s)", len(resumed))
+        # The watcher processes inline here, so staged work is normally
+        # gone within one run_job(). What this catches is a job a
+        # transient error left behind mid-way — before, it sat in
+        # _processing/ until the next restart. Only jobs older than any
+        # in-flight extraction could be are touched, so this never races
+        # the watcher for a job it is still working on.
+        sweep_interval = max(60.0, config.cluster.sweep_interval_seconds)
+        min_age = config.extraction.timeout_seconds + 60
+
+    def sweep_forever() -> None:
+        # In parallel mode the first pass runs at once, as it always did —
+        # a pod that just started should not idle for an interval while
+        # staged work waits. Otherwise startup already swept, above.
+        first = config.cluster.parallel_extraction
+        while first or not stop_event.wait(sweep_interval):
+            first = False
+            try:
+                resumed = pipeline.resume_staged(staging_root, min_age_seconds=min_age)
+                if resumed:
+                    log.info("processed %d staged job(s)", len(resumed))
+            except Exception:
+                log.exception("extraction sweep failed")
+
+    sweep_thread = threading.Thread(target=sweep_forever, name="extraction-sweep", daemon=True)
+    sweep_thread.start()
 
     watcher = Watcher(
         config, pipeline,
@@ -645,7 +633,7 @@ def run(config_path: str) -> None:
         watcher.run_forever(stop_event)
     finally:
         stop_event.set()
-        if sweep_thread is not None:
+        if sweep_thread.is_alive():
             # A sweep can be legitimately mid-extraction when shutdown
             # starts, and one extraction call is allowed to run for up to
             # extraction.timeout_seconds — joining for only one sweep
@@ -679,7 +667,7 @@ def reindex(config_path: str, do_commit: bool) -> None:
     run by default."""
     from dlpduck.reindex import Reindexer
 
-    config = load_config(config_path)
+    config = _load(config_path)
     pipeline = Pipeline(config)
     summary = Reindexer(pipeline).run(commit=do_commit)
 
@@ -688,6 +676,13 @@ def reindex(config_path: str, do_commit: bool) -> None:
     click.echo(f"  rebuilt from content:  {summary.count('content')}")
     click.echo(f"  rebuilt from PDF (re-extracted): {summary.count('pdf')}")
     click.echo(f"  failed:                {summary.count('failed')}")
+    if summary.skipped:
+        click.secho(
+            f"  skipped {len(summary.skipped)} file(s) not named <job_id>.pdf — not written by "
+            "DLPDuck, left untouched:", fg="yellow",
+        )
+        for path in summary.skipped:
+            click.echo(f"      {path}")
     if summary.ruleset_disagreements:
         click.secho(
             f"  {summary.ruleset_disagreements} document(s) are filed somewhere the CURRENT "
@@ -759,13 +754,25 @@ def console_run(config_path: str) -> None:
 
     from dlpduck.console.app import create_app
 
-    config = load_config(config_path)
-    config.apply_umask()
+    config = _load(config_path)
     pipeline = Pipeline(config)
     app = create_app(config, pipeline)
 
     host, port = config.console.host_port()
-    uvicorn.run(app, host=host, port=port)
+    proxies = config.console.forwarded_allow_ips
+    uvicorn.run(
+        app, host=host, port=port,
+        # Uvicorn's own default is to trust 127.0.0.1 only; this widens it
+        # to the configured proxies (see ConsoleConfig.forwarded_allow_ips).
+        **({"proxy_headers": True, "forwarded_allow_ips": proxies} if proxies else {}),
+    )
+
+
+from dlpduck.cli_queries import correlate, jobs, search  # noqa: E402 — registered below
+
+main.add_command(search)
+main.add_command(jobs)
+main.add_command(correlate)
 
 
 if __name__ == "__main__":

@@ -34,7 +34,7 @@ documents under new rules, approve releases, and purge retained content.
 
 | Built for | What DLPDuck does |
 |---|---|
-| Scanners and MFPs | Waits for stable PDF and companion metadata files before claiming them |
+| Scanners and MFPs | Waits for stable PDF, TIFF, JPEG or PNG files and their companion metadata before claiming them |
 | Mixed PDFs | Uses native text where it is trustworthy and OCR on sparse or image-bearing pages |
 | Position-sensitive policy | Matches by page, line, document scope, and configurable line ranges |
 | Sensitive findings | Stores masked values and keyed correlation digests, never the raw match |
@@ -65,8 +65,8 @@ documents under new rules, approve releases, and purge retained content.
 
 ## How it works
 
-1. The watcher waits until a PDF stops changing, then moves it into staging.
-2. Each page uses native text when suitable and OCR when it is sparse or contains images.
+1. The watcher waits until a PDF (or a TIFF/JPEG/PNG scan, converted losslessly to PDF) stops changing, then moves it into staging.
+2. Each page uses native text when suitable and OCR when it is sparse; on a page with both, native text is kept and OCR adds only what is inside the images. A measurably blank page is not treated as a failed one.
 3. Rules inspect lines or the complete document and mask every recorded match.
 4. Enrichment plugins can add routing context before the final decision.
 5. Clean documents enter the archive; matches and incomplete extraction enter quarantine.
@@ -222,7 +222,8 @@ umask: "0077"                   # owner-only for everything written; null to inh
 source:
   name: mfp-3f                  # recorded on every job
   path: /srv/dlpduck/drops
-  pdf_suffix: .pdf
+  pdf_suffix: .pdf              # case-insensitive
+  image_suffixes: [.tif, .tiff, .jpg, .jpeg, .png]  # converted to PDF at claim
   metadata_format: none         # xml | json | text | none
   metadata_suffix: .xml         # companion file: scan.pdf + scan.xml
   metadata_fields: []           # ALLOWLIST — see the note below
@@ -235,12 +236,15 @@ limits:
   max_pages: 500
   rule_budget_ms: 2000          # per rule, per document
   max_metadata_bytes: 1048576   # 1 MB — companion files are bounded too
+  max_image_pixels: 150000000   # per image frame, checked before decoding
 
 extraction:
   dpi: 150                      # OCR raster resolution
   native_min_chars: 20          # per page: below this, the page goes to OCR
+  blank_page_max_ink: 0.0001    # an empty page this clean is blank, not degraded
   isolate_worker: true          # contain parser/OCR hangs in a child process
   timeout_seconds: 120          # whole-document extraction budget
+  worker_memory_mb: 4096        # address-space cap for the isolated worker
 
 dlp:
   quarantine_on_degraded: true  # fail closed
@@ -273,6 +277,7 @@ console:
   session_max_age_seconds: 28800     # 8h; sessions can be revoked sooner
   session_cookie_secure: false       # set true behind TLS
   audit_search_terms: hashed         # hashed avoids storing search queries
+  forwarded_allow_ips: null          # trusted reverse proxies, e.g. "10.0.0.0/8"
   auth:
     max_failed_logins: 10       # then that username/address waits out the lockout
     lockout_seconds: 300
@@ -381,10 +386,10 @@ Field reference:
 | `id` | Unique key. Letters, digits, `.`, `_`, `-`; max 64 chars. |
 | `pattern` | Python regex. No implicit flags — write `(?i)` if you want one. |
 | `severity` | Ranked; the document's highest hit wins. |
-| `action` | `quarantine` routes the document; `flag` records it and archives; `ignore` records nothing. |
+| `action` | `quarantine` routes the document; `flag` records it and archives; `ignore` records the masked hit but never affects routing. |
 | `scope` | `line` matches per line; `document` matches the joined text (for values that wrap). |
 | `line_scope` | With a position window: `page` (per page) or `document`. |
-| `min_line` / `max_line` | Inclusive 0-indexed window. Omit both for "anywhere". |
+| `min_line` / `max_line` | Inclusive 0-indexed window. Omit both for "anywhere". A `document`-scope match is placed by the line it starts on. |
 | `from_end` | Count the window from the end (footers). |
 | `validator` | Checksum applied to each candidate before it counts. |
 | `mask_keep` | Trailing characters left visible. Ignored when the match is short enough that a tail would reveal most of it. |
@@ -440,8 +445,10 @@ dlpduck console run --config config.yaml
 ```
 
 Screens: Overview, Jobs, job detail (findings, receipt history, metadata,
-reveal, reprocess, purge, audit timeline), Needs attention, Search, Rules,
-Audit, Access. Overview counters link to their filtered queue; a worker card
+reveal, reprocess, purge, audit timeline), Needs attention, Search, Correlate,
+Rules, Audit, Access. Jobs, Search and Correlate share one set of filters
+(severity, rule, disposition, source, with/without hits, dates) and export
+the current result as CSV; every search, correlation and export is audited. Overview counters link to their filtered queue; a worker card
 shows watcher heartbeat, activity and drop-folder backlog.
 
 Needs attention holds refused, failed and interrupted documents — inspect,
@@ -454,12 +461,12 @@ before retrying. Failed documents follow `retention.documents_days`.
 | Permission | viewer | investigator | dlp_admin | auditor |
 |---|:--:|:--:|:--:|:--:|
 | `jobs.list`, `jobs.metadata.read`, `rules.read` | ✅ | ✅ | ✅ | ✅ |
-| `dlp.hits.read` (masked) | | ✅ | ✅ | ✅ |
-| `jobs.text.read` (search) | | ✅ | ✅ | |
+| `dlp.hits.read` (masked hits, correlation from a hit, rule filter) | | ✅ | ✅ | ✅ |
+| `jobs.text.read` (search, correlating a typed value) | | ✅ | ✅ | |
 | `jobs.pdf.read` (archived PDFs) | | ✅ | ✅ | |
 | `jobs.pdf.read.quarantined` | | | ✅ | |
 | `dlp.reveal` (cleartext) | | | ✅ | |
-| `quarantine.release`, `jobs.purge`, `rules.write`, `access.write` | | | ✅ | |
+| `quarantine.release`, `jobs.purge`, `access.write` | | | ✅ | |
 | `jobs.failed.manage` (the refused/unprocessable queue) | | | ✅ | |
 | `jobs.reprocess.preview` | | ✅ | ✅ | |
 | `jobs.reprocess.commit` | | | ✅ | |
@@ -488,7 +495,9 @@ never document text, the PDF, or cleartext).
 | `run` | Start the watcher daemon. |
 | `scan <pdf>` | Dry-run one document; print lines and what would hit. Writes nothing. |
 | `test-rules <dir>` | Run the ruleset over a corpus and report per-rule hit counts. |
-| `search <query>` | Full-text search across the content store. |
+| `search <query>` | Full-text search: all words required, `"phrases"`, `-exclusions`; filter by severity, rule, disposition, source, hits, dates. `--json` for scripts. |
+| `jobs` | List current assessments with the same filters, from the index alone. `--json` for scripts. |
+| `correlate` | Every document holding one sensitive value — from a hit's `--hmac`, or `--value` (prompted, never on the command line). Works after content is purged. |
 | `reprocess` | Re-run the current ruleset over already-ingested jobs. Preview by default; `--commit` to apply. `--mode extract` re-runs OCR too. |
 | `release <job_id>` | Carry out a pending de-escalation (quarantine → archive). |
 | `purge-content <job_id>` | Soft purge; `--hard` also deletes the PDF. |

@@ -59,7 +59,8 @@
   <div class="hitcard sev-{{ h.severity }}">
     <div><strong>{{ h.rule_name }}</strong> <span class="chip {{ h.severity|lower }}">{{ h.severity }}</span>
       <span class="mono hit-meta">p{{ h.page_number }} L{{ h.line_number }} &middot; action={{ h.action }}</span></div>
-    <div class="hitline">{{ h.masked_text }}</div>
+    <div class="hitline">{{ h.masked_text }}
+      {% if h.match_hmac %}<a class="btn btn-ghost btn-sm" href="/correlate?hmac={{ h.match_hmac }}" title="Every document in which this same value was found">Where else?</a>{% endif %}</div>
     {% if revealed and revealed.index == loop.index0 %}
     <div class="hitline revealed">
       {% if revealed.value is not none %}revealed: {{ revealed.value }}{% else %}unable to re-derive the value — content unavailable{% endif %}
@@ -167,6 +168,7 @@
     (mode={{ reprocess_result.mode }}) &mdash;
     {% if not o %}no job in scope.
     {% elif o.direction == "content_unavailable" %}content unavailable (purged) &mdash; nothing to reassess.
+    {% elif o.direction == "error" %}could not be reassessed: {{ o.detail }}. Nothing was written.
     {% else %}
       <span class="mono">{{ o.direction }}</span>:
       disposition {{ o.old_disposition }} &rarr; {{ o.new_disposition }},

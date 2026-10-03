@@ -11,10 +11,12 @@ import json
 import logging
 import os
 import shutil
+import time
 import uuid
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from dlpduck.audit import AuditLog
 from dlpduck.config import Config
@@ -29,15 +31,17 @@ from dlpduck.durability import (
 )
 from dlpduck.engine import DLPEngine
 from dlpduck.extract import LineExtractor
+from dlpduck.extract_worker import convert_isolated, inspect_isolated
+from dlpduck.images import IMAGE_FORMATS, UnreadableImage, image_to_pdf, sniff
 from dlpduck.index import write_index_row
 from dlpduck.metadata import MetadataParserFactory, allowlist
 from dlpduck.operations import LockContended, OperationalStore, operation_lock, serialized
 from dlpduck.pdf_metadata import extract_pdf_metadata
-from dlpduck.pdfium import page_count
 from dlpduck.plugins.base import PluginError, PluginRunner
 from dlpduck.rules import ruleset_version
 from dlpduck.tracing import content_trace_enabled
 from dlpduck.types import (
+    AUDIT_HIT_FIELDS,
     DLPHit,
     DocumentText,
     DocumentTooLarge,
@@ -46,27 +50,76 @@ from dlpduck.types import (
     RuleBudgetExceeded,
     Severity,
     TextLine,
+    TooManyPages,
     UnsafeSourceFile,
+    hit_record,
 )
 
 logger = logging.getLogger("dlpduck.pipeline")
+
+
+# What claim refuses outright, before a job exists: routed to failed/ by
+# reject_at_claim() rather than retried from the drop folder forever.
+CLAIM_REFUSALS = (DocumentTooLarge, UnsafeSourceFile, UnreadableImage)
+
+
+@dataclass(frozen=True)
+class _Source:
+    """A drop-folder file, read once and in the form the pipeline stores:
+    `data` is always PDF bytes. `origin` describes the scanner image it was
+    converted from, or is None for a file that arrived as a PDF."""
+
+    data: bytes
+    opened: os.stat_result
+    origin: dict | None = None
 
 
 def content_job_id(pdf_bytes: bytes) -> str:
     return hashlib.blake2b(pdf_bytes, digest_size=16).hexdigest()
 
 
-def _read_bounded(path: Path, limit: int) -> bytes | None:
-    """Read at most `limit` bytes, or None if the file is bigger. Used for
-    companion metadata, which arrives from the same drop folder as the PDF
-    and so gets the same "bounded by what is actually read" treatment."""
-    data, _ = _read_bounded_with_stat(path, limit)
-    return data
+# Bumped when the staging manifest gains something older readers lacked.
+# 2: `audit_started` precedes the completion append; `metadata` is recorded.
+MANIFEST_VERSION = 2
+
+# Names this pipeline writes into a job's staging directory itself. A
+# sender's companion file is never staged under its own name, so none of
+# these can be overwritten from the drop folder.
+STAGED_COMPANION = "companion.meta"
+STAGED_REJECTED_COMPANION = "companion.rejected-symlink"
+_RESERVED_STAGING_NAMES = frozenset(
+    {"document.pdf", "manifest.json", "resolution.json", STAGED_COMPANION,
+     STAGED_REJECTED_COMPANION}
+)
+
+
+def is_resolved(job_dir: Path) -> bool:
+    """Has an operator marked this staged or failed job resolved?
+
+    Only a record FailureQueue.resolve() actually wrote counts. Before
+    companions were staged under a fixed name, a sender could drop
+    `resolution.pdf` with a `resolution.json` beside it and have the
+    never-scanned document skipped by every sweep and filed straight into
+    the resolved queue; a directory staged by that release must not keep
+    that effect after an upgrade.
+    """
+    path = job_dir / "resolution.json"
+    if not path.is_file() or path.is_symlink():
+        return False
+    try:
+        record = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return False
+    return isinstance(record, dict) and {"reason", "actor"} <= record.keys()
 
 
 def _read_bounded_with_stat(
     path: Path, limit: int
 ) -> tuple[bytes | None, os.stat_result]:
+    """Read at most `limit` bytes without following a symlink. Returns
+    (None, stat) if the file is bigger than `limit`: companion metadata
+    arrives from the same drop folder as the PDF and so gets the same
+    "bounded by what is actually read" treatment."""
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
         fd = os.open(path, flags)
@@ -82,6 +135,16 @@ def _read_bounded_with_stat(
     with os.fdopen(fd, "rb") as file:
         data = file.read(limit + 1)
     return (None if len(data) > limit else data), stat
+
+
+def _older_than(job_dir: Path, cutoff: float) -> bool:
+    """Was this staged job last touched before `cutoff`? Judged by its
+    manifest, which every step of a job's progress rewrites."""
+    marker = job_dir / "manifest.json"
+    try:
+        return (marker if marker.exists() else job_dir).stat().st_mtime < cutoff
+    except FileNotFoundError:
+        return False
 
 
 def _unlink_if_same(path: Path, opened: os.stat_result) -> None:
@@ -102,6 +165,9 @@ class Pipeline:
             dpi=config.extraction.dpi,
             isolate=config.extraction.isolate_worker,
             timeout=config.extraction.timeout_seconds,
+            max_pages=config.limits.max_pages,
+            memory_mb=config.extraction.worker_memory_mb,
+            blank_max_ink=config.extraction.blank_page_max_ink,
         )
         self.extractor.NATIVE_MIN_CHARS = config.extraction.native_min_chars
         self.engine = DLPEngine(
@@ -117,12 +183,74 @@ class Pipeline:
         self.index_root = config.destination.work_dir / "index"
         self.content_root = config.destination.work_dir / "content"
         self.plugins = PluginRunner(config.load_plugins(), self.audit)
+        self._warned_uncertain: set[str] = set()
 
     def job_lock(self, job_id: str, *, blocking: bool = True):
         """Per-job_id lock: stops two attempts to claim, recover, or
         retry the *same* job from racing, without making unrelated
         job_ids contend."""
         return operation_lock(self.config.destination.work_dir / "_locks" / job_id, blocking=blocking)
+
+    def _pdf_metadata(self, pdf_bytes: bytes) -> dict:
+        """The PDF's own Info dictionary. Reading it means parsing the PDF,
+        so it happens in the isolated worker whenever extraction does."""
+        if self.config.extraction.isolate_worker:
+            # Bounded well below the extraction budget: this runs inside
+            # claim, on the watcher's single poll thread, and reading an
+            # Info dictionary is milliseconds of work for any honest PDF.
+            return inspect_isolated(
+                pdf_bytes,
+                timeout=min(30.0, self.config.extraction.timeout_seconds),
+                memory_mb=self.config.extraction.worker_memory_mb,
+            )
+        return extract_pdf_metadata(pdf_bytes)
+
+    def _read_source(self, path: Path) -> _Source:
+        """Read a drop-folder file without following a symlink, bounded by
+        limits.max_bytes, and convert a scanner image to PDF.
+
+        The format is decided from the content, not the filename: a retry
+        restores a failed job under its original name (scan.tif) while the
+        stored document is already the converted PDF, and a scanner that
+        mislabels its output should not decide how it is parsed.
+        """
+        limit = self.config.limits.max_bytes
+        raw, opened = _read_bounded_with_stat(path, limit)
+        if opened.st_size > limit:
+            raise DocumentTooLarge(f"{path} is {opened.st_size} bytes, over the configured limit")
+        # Read with the limit as a hard ceiling rather than trusting the
+        # stat above: the file can still grow between the two (a writer
+        # that wasn't finished after all), and the limit exists to bound
+        # what actually reaches memory.
+        if raw is None:
+            raise DocumentTooLarge(f"{path} exceeds the configured {limit}-byte limit")
+
+        kind = sniff(raw)
+        if kind in IMAGE_FORMATS:
+            pdf = self._convert_image(raw)
+            origin = {
+                "source_format": kind,
+                "source_sha256": hashlib.sha256(raw).hexdigest(),
+                "source_bytes": len(raw),
+            }
+            return _Source(pdf, opened, origin)
+        if kind is None and path.suffix.lower() in {
+            s.lower() for s in self.config.source.image_suffixes
+        }:
+            raise UnreadableImage(f"{path.name} is not a TIFF, JPEG or PNG image")
+        return _Source(raw, opened)
+
+    def _convert_image(self, raw: bytes) -> bytes:
+        limits, extraction = self.config.limits, self.config.extraction
+        if extraction.isolate_worker:
+            return convert_isolated(
+                raw,
+                max_pages=limits.max_pages,
+                max_pixels=limits.max_image_pixels,
+                timeout=extraction.timeout_seconds,
+                memory_mb=extraction.worker_memory_mb,
+            )
+        return image_to_pdf(raw, max_pages=limits.max_pages, max_pixels=limits.max_image_pixels)
 
     def _discard_job_lock_dir(self, job_id: str) -> None:
         """claim() now takes job_lock() for every arrival, not just
@@ -156,7 +284,7 @@ class Pipeline:
         """
         receipt_id = uuid.uuid4().hex
         received_at = datetime.now(UTC)
-        receipt_metadata = extract_pdf_metadata(content_bytes)
+        receipt_metadata = self._pdf_metadata(content_bytes)
         opened_metadata = None
         if metadata_path is not None and metadata_path.is_symlink():
             self.audit.append(
@@ -199,7 +327,14 @@ class Pipeline:
 
     # ── claim ────────────────────────────────────────────────────────
 
-    def claim(self, pdf_path: Path, metadata_path: Path | None, staging_root: Path) -> JobContext:
+    def claim(
+        self,
+        pdf_path: Path,
+        metadata_path: Path | None,
+        staging_root: Path,
+        *,
+        source: _Source | None = None,
+    ) -> JobContext:
         """Safely read and claim a source pair into a job-scoped staging
         directory, then build its initial JobContext. Raises
         DocumentTooLarge / IOError before a complete file is accepted if
@@ -219,21 +354,9 @@ class Pipeline:
         # and that file's contents would end up extracted into the content
         # store — searchable, and downloadable through the console.
         logger.debug("claiming %s (source=%s)", pdf_path.name, self.config.source.name)
-        pdf_bytes, opened_pdf = _read_bounded_with_stat(
-            pdf_path, self.config.limits.max_bytes
-        )
-        size = opened_pdf.st_size
-        if size > self.config.limits.max_bytes:
-            raise DocumentTooLarge(f"{pdf_path} is {size} bytes, over the configured limit")
-
-        # Read with the limit as a hard ceiling rather than trusting the
-        # stat above: the file can still grow between the two (a writer
-        # that wasn't finished after all), and the limit exists to bound
-        # what actually reaches memory.
-        if pdf_bytes is None:
-            raise DocumentTooLarge(
-                f"{pdf_path} exceeds the configured {self.config.limits.max_bytes}-byte limit"
-            )
+        if source is None:
+            source = self._read_source(pdf_path)
+        pdf_bytes, opened_pdf = source.data, source.opened
         job_id = content_job_id(pdf_bytes)
         pdf_sha256 = hashlib.sha256(pdf_bytes).hexdigest()
 
@@ -249,7 +372,8 @@ class Pipeline:
         try:
             with self.job_lock(job_id, blocking=False):
                 return self._claim_locked(
-                    pdf_path, opened_pdf, metadata_path, staging_root, job_id, pdf_bytes, pdf_sha256
+                    pdf_path, opened_pdf, metadata_path, staging_root, job_id, pdf_bytes,
+                    pdf_sha256, source.origin,
                 )
         except LockContended:
             received_at, metadata = self._record_duplicate_arrival(
@@ -276,6 +400,7 @@ class Pipeline:
         job_id: str,
         pdf_bytes: bytes,
         pdf_sha256: str,
+        origin: dict | None = None,
     ) -> JobContext:
         staging_dir = staging_root / job_id
         staging_dir.mkdir(parents=True, exist_ok=True)
@@ -285,9 +410,11 @@ class Pipeline:
         # an attacker swaps that directory entry for a symlink.
         receipt_id = uuid.uuid4().hex
         received_at = datetime.now(UTC)
-        manifest = {"receipt_id": receipt_id, "received_at": received_at.isoformat(),
+        manifest: dict[str, Any] = {"receipt_id": receipt_id, "received_at": received_at.isoformat(),
                     "filename": pdf_path.name, "source_name": self.config.source.name,
-                    "steps": []}
+                    "steps": [], "version": MANIFEST_VERSION}
+        if origin is not None:
+            manifest["origin"] = origin
         write_atomically(staging_dir / "manifest.json", json.dumps(manifest))
         write_bytes_durably(staged_pdf, pdf_bytes)
         _unlink_if_same(pdf_path, opened_pdf)
@@ -298,15 +425,19 @@ class Pipeline:
             manifest["filename"],
             self.config.source.name,
         )
+        if origin is not None:
+            # The archived PDF is not byte-identical to what the scanner
+            # wrote, so what it was converted from is part of the record.
+            self.audit.append(
+                "document.converted", job_id=job_id, receipt_id=receipt_id,
+                filename=pdf_path.name, **origin,
+            )
 
         # Read the PDF's own Info dictionary first; a companion
         # file, when one exists, wins on any key they both set.
-        raw_metadata: dict = extract_pdf_metadata(pdf_bytes)
+        raw_metadata: dict = self._pdf_metadata(pdf_bytes)
         if metadata_path is not None and metadata_path.is_symlink():
-            shutil.move(
-                str(metadata_path),
-                str(staging_dir / f"{metadata_path.name}.rejected-symlink"),
-            )
+            shutil.move(str(metadata_path), str(staging_dir / STAGED_REJECTED_COMPANION))
             self.audit.append(
                 "metadata.rejected",
                 job_id=job_id,
@@ -318,7 +449,14 @@ class Pipeline:
                 metadata_path, self.config.limits.max_metadata_bytes
             )
             if content is not None:
-                write_bytes_durably(staging_dir / metadata_path.name, content)
+                # Under a fixed name, never the sender's. The staging
+                # directory also holds this job's own manifest.json and,
+                # once an operator acts, resolution.json — a companion
+                # called either of those would overwrite the manifest (and
+                # wedge the job) or mark a never-scanned document resolved.
+                write_bytes_durably(staging_dir / STAGED_COMPANION, content)
+                manifest["companion"] = metadata_path.name
+                write_atomically(staging_dir / "manifest.json", json.dumps(manifest))
             _unlink_if_same(metadata_path, opened_metadata)
             if content is None:
                 logger.warning(
@@ -351,6 +489,11 @@ class Pipeline:
 
         metadata = allowlist(raw_metadata, self.config.source.metadata_fields)
         self.operations.receipt_metadata(job_id, receipt_id, metadata)
+        # Kept with the job, so whichever replica's sweep picks it up uses
+        # what was decided here instead of parsing the PDF (in another
+        # worker process) and the companion all over again.
+        manifest["metadata"] = metadata
+        write_atomically(staging_dir / "manifest.json", json.dumps(manifest))
         if content_trace_enabled():
             logger.debug("job %s claimed metadata: %r", job_id, metadata)
         else:
@@ -372,21 +515,16 @@ class Pipeline:
     def process(self, ctx: JobContext) -> None:
         pdf_bytes = ctx.pdf_path.read_bytes()
 
-        detected_page_count = page_count(pdf_bytes)
-        if detected_page_count is not None and detected_page_count > self.config.limits.max_pages:
-            ctx.disposition = "failed"
-            ctx.reason = "page_count_exceeds_limit"
-            self.audit.append(
-                "job.failed",
-                job_id=ctx.job_id,
-                reason=ctx.reason,
-                page_count=detected_page_count,
-            )
-            return
-
         logger.debug("job %s extracting (%d bytes)", ctx.job_id, len(pdf_bytes))
         try:
             ctx.text = self.extractor.extract(pdf_bytes)
+        except TooManyPages as exc:
+            ctx.disposition = "failed"
+            ctx.reason = "page_count_exceeds_limit"
+            self.audit.append(
+                "job.failed", job_id=ctx.job_id, reason=ctx.reason, page_count=exc.page_count
+            )
+            return
         except EncryptedDocument:
             ctx.disposition = "failed"
             ctx.reason = "encrypted"
@@ -417,6 +555,17 @@ class Pipeline:
             self.audit.append(
                 "job.failed", job_id=ctx.job_id, reason=ctx.reason, rule_id=exc.rule_id
             )
+            return
+        except Exception as exc:
+            # A rule or validator that raises (a custom validator meeting
+            # input it didn't expect, say) means this document could not
+            # be assessed. That is a failure to route, not a crash to let
+            # escape: escaping left the job staged and retried on every
+            # sweep, failing identically each time.
+            logger.exception("job %s: scanning raised", ctx.job_id)
+            ctx.disposition = "failed"
+            ctx.reason = f"scan_error: {type(exc).__name__}"
+            self.audit.append("job.failed", job_id=ctx.job_id, reason=ctx.reason)
             return
         logger.debug("job %s scanned: %d hit(s)", ctx.job_id, len(ctx.hits))
 
@@ -465,6 +614,31 @@ class Pipeline:
         }
         self._checkpoint(ctx, manifest, "assessed")
 
+    def _completion_already_audited(self, ctx: JobContext, manifest: dict) -> bool:
+        """Did a previous attempt append this receipt's job.completed and
+        crash before checkpointing it?
+
+        Only answerable by reading the trail, which used to happen on every
+        commit — a scan of the whole audit history per document, growing
+        without bound. Now the manifest records `audit_started` just before
+        the append, so the trail is read only when that marker says an
+        append may have happened, and then only from the receipt's own day.
+        """
+        if not manifest.get("receipt_id"):
+            return False
+        # A manifest from before `audit_started` existed cannot say either
+        # way, so it gets the old full check.
+        legacy = manifest.get("version", 1) < MANIFEST_VERSION
+        if not legacy and "audit_started" not in manifest["steps"]:
+            return False
+        since = None
+        if manifest.get("received_at"):
+            since = datetime.fromisoformat(manifest["received_at"]).date()
+        return any(
+            e.get("receipt_id") == manifest["receipt_id"] and e.get("event") == "job.completed"
+            for e in self.audit.events_for_job(ctx.job_id, since=since)
+        )
+
     @serialized
     def commit(self, ctx: JobContext) -> Path:
         """1) copy the PDF, 2) append+fsync the audit event, 3) write the
@@ -496,9 +670,8 @@ class Pipeline:
             copy_durably(ctx.pdf_path, dest_path)
             self._checkpoint(ctx, manifest, "pdf")
 
-        already_audited = any(e.get("receipt_id") == manifest.get("receipt_id") and e.get("event") == "job.completed"
-                              for e in self.audit.events_for_job(ctx.job_id)) if manifest.get("receipt_id") else False
-        if "audit" not in manifest["steps"] and not already_audited:
+        if "audit" not in manifest["steps"] and not self._completion_already_audited(ctx, manifest):
+            self._checkpoint(ctx, manifest, "audit_started")
             self.audit.append(
                 "job.completed",
                 receipt_id=manifest.get("receipt_id"),
@@ -511,16 +684,7 @@ class Pipeline:
                 degraded=ctx.text.degraded,
                 highest_severity=ctx.highest_severity.value if ctx.highest_severity else None,
                 hit_count=len(ctx.hits),
-                hits=[
-                    {
-                        "rule_id": h.rule_id,
-                        "severity": h.severity.value,
-                        "page_number": h.page_number,
-                        "line_number": h.line_number,
-                        "masked_text": h.masked_text,
-                    }
-                    for h in ctx.hits
-                ],
+                hits=[hit_record(h, AUDIT_HIT_FIELDS) for h in ctx.hits],
                 audit_fields=ctx.audit_fields,
             )
         self._checkpoint(ctx, manifest, "audit")
@@ -690,6 +854,7 @@ class Pipeline:
             mode="hard" if hard else "soft",
         )
         content_removed = delete_content_file(self.content_root, job_id)
+        text_dropped = self._drop_pending_transition_text(job_id)
         document_removed = None
         if hard:
             document_removed = delete_document_file(
@@ -703,8 +868,27 @@ class Pipeline:
             mode="hard" if hard else "soft",
             content_removed=content_removed,
             document_removed=document_removed,
+            **({"pending_transition_text_dropped": True} if text_dropped else {}),
         )
         return PurgeResult(content_removed=content_removed, document_removed=document_removed)
+
+    def _drop_pending_transition_text(self, job_id: str) -> bool:
+        """An extract-mode reassessment that crashed part-way leaves its
+        transition (dlpduck.reprocess) on disk, carrying the freshly
+        extracted text, to be finished on the next start. Finishing it
+        after a purge would write that text straight back into the content
+        store — undoing the erasure with nothing recording it. The
+        assessment itself is still worth completing; only its text goes.
+        Runs under the same lock recovery does (purge is @serialized)."""
+        path = self.config.destination.work_dir / "transitions" / f"{job_id}.json"
+        if not path.is_file():
+            return False
+        payload = json.loads(path.read_text())
+        if payload.get("text") is None:
+            return False
+        payload["text"] = None
+        write_atomically(path, json.dumps(payload))
+        return True
 
     def run_job(self, pdf_path: Path, metadata_path: Path | None, staging_root: Path) -> JobContext:
         # Deliberately NOT @serialized: extraction (the slow part) used to
@@ -714,21 +898,20 @@ class Pipeline:
         # commit sees "stores" already checkpointed and no-ops), so that
         # boundary is enough. Detect a duplicate arrival before claiming so
         # an earlier job staged during an uncertain emit isn't overwritten.
-        if not pdf_path.is_symlink():
-            try:
-                duplicate_bytes, opened_pdf = _read_bounded_with_stat(
-                    pdf_path, self.config.limits.max_bytes
-                )
-            except UnsafeSourceFile:
-                duplicate_bytes = None
-            if duplicate_bytes is not None:
-                duplicate_id = content_job_id(duplicate_bytes)
+        #
+        # The file is read (and, for a scanner image, converted) exactly
+        # once here and handed to claim(), rather than read for this check
+        # and then again to claim it.
+        try:
+            source = None if pdf_path.is_symlink() else self._read_source(pdf_path)
+            if source is not None:
+                duplicate_id = content_job_id(source.data)
                 from dlpduck.reprocess import latest_index_rows
 
                 existing = latest_index_rows(self.index_root, job_ids=[duplicate_id])
                 if existing:
                     received_at, receipt_metadata = self._record_duplicate_arrival(
-                        duplicate_id, pdf_path, opened_pdf, metadata_path, duplicate_bytes,
+                        duplicate_id, pdf_path, source.opened, metadata_path, source.data,
                         event="job.received_again",
                     )
                     return JobContext(
@@ -737,14 +920,13 @@ class Pipeline:
                         source_name=self.config.source.name,
                         staging_dir=staging_root / duplicate_id,
                         pdf_path=pdf_path,
-                        pdf_sha256=hashlib.sha256(duplicate_bytes).hexdigest(),
+                        pdf_sha256=hashlib.sha256(source.data).hexdigest(),
                         metadata=receipt_metadata,
                         disposition=existing[0]["disposition"],
                         reason="duplicate_receipt",
                     )
-        try:
-            ctx = self.claim(pdf_path, metadata_path, staging_root)
-        except (DocumentTooLarge, UnsafeSourceFile) as exc:
+            ctx = self.claim(pdf_path, metadata_path, staging_root, source=source)
+        except CLAIM_REFUSALS as exc:
             # A refusal, not a crash — route it fail-closed rather than
             # letting it escape to a caller whose only option is to log it
             # and try the same file again next poll.
@@ -787,7 +969,7 @@ class Pipeline:
         """
         try:
             return self.claim(pdf_path, metadata_path, staging_root)
-        except (DocumentTooLarge, UnsafeSourceFile) as exc:
+        except CLAIM_REFUSALS as exc:
             self.reject_at_claim(pdf_path, type(exc).__name__, str(exc))
             return None
 
@@ -823,7 +1005,9 @@ class Pipeline:
 
     # ── crash recovery ───────────────────────────────────────────────
 
-    def resume_staged(self, staging_root: Path, job_id: str | None = None) -> list[JobContext]:
+    def resume_staged(
+        self, staging_root: Path, job_id: str | None = None, *, min_age_seconds: float = 0
+    ) -> list[JobContext]:
         """Process anything sitting claimed-but-unfinished in
         `_processing/` — a job a crashed process never got back to, or
         (when run continuously; see cli.py) one the watcher only just
@@ -841,10 +1025,13 @@ class Pipeline:
         if not staging_root.is_dir():
             return resumed
 
+        cutoff = time.time() - min_age_seconds
         for job_dir in sorted(staging_root.iterdir()):
             if job_id is not None and job_dir.name != job_id:
                 continue
-            if (job_dir / "resolution.json").is_file():
+            if min_age_seconds and not _older_than(job_dir, cutoff):
+                continue
+            if is_resolved(job_dir):
                 continue
             staged_pdf = job_dir / "document.pdf"
             if not job_dir.is_dir() or not staged_pdf.is_file():
@@ -863,6 +1050,51 @@ class Pipeline:
                 resumed.append(ctx)
         return resumed
 
+    def _staged_companion(self, job_dir: Path) -> Path | None:
+        """The companion staged beside this job's PDF, if any.
+
+        Current claims always write it as STAGED_COMPANION. A directory
+        staged by an older release holds it under the sender's own
+        filename instead, so that is still looked for — but never one of
+        the names this pipeline writes itself, and in a fixed order rather
+        than whatever order the filesystem lists entries in.
+        """
+        fixed = job_dir / STAGED_COMPANION
+        if fixed.is_file() and not fixed.is_symlink():
+            return fixed
+        suffix = self.config.source.metadata_suffix.lower()
+        legacy = sorted(
+            p
+            for p in job_dir.iterdir()
+            if p.name.lower().endswith(suffix)
+            and p.name not in _RESERVED_STAGING_NAMES
+            and p.is_file()
+            and not p.is_symlink()
+        )
+        return legacy[0] if legacy else None
+
+    def _staged_metadata(self, job_dir: Path, manifest: dict, pdf_bytes: bytes) -> dict:
+        """The allowlisted metadata claim settled on for this job. A
+        directory staged by an older release has none recorded, so it is
+        derived again from the PDF and the staged companion."""
+        if isinstance(manifest.get("metadata"), dict):
+            return manifest["metadata"]
+        raw_metadata: dict = self._pdf_metadata(pdf_bytes)
+        companion = self._staged_companion(job_dir)
+        if companion is not None:
+            content, _ = _read_bounded_with_stat(companion, self.config.limits.max_metadata_bytes)
+            if content is None:
+                logger.warning(
+                    "companion %s exceeds limits.max_metadata_bytes — ignoring it",
+                    companion.name,
+                )
+            else:
+                try:
+                    raw_metadata = {**raw_metadata, **self.metadata_parser.parse(content)}
+                except Exception as exc:
+                    logger.warning("metadata parse failed resuming %s: %s", job_dir.name, exc)
+        return allowlist(raw_metadata, self.config.source.metadata_fields)
+
     def _resume_one(self, job_dir: Path, staged_pdf: Path) -> JobContext | None:
         logger.debug("resume_staged: found staged job %s", job_dir.name)
         pdf_bytes = staged_pdf.read_bytes()
@@ -878,9 +1110,11 @@ class Pipeline:
         manifest_path = job_dir / "manifest.json"
         manifest = json.loads(manifest_path.read_text()) if manifest_path.is_file() else {}
         if "emit_started" in manifest.get("steps", []) and "emitted" not in manifest.get("steps", []):
-            logger.warning("job %s needs explicit delivery retry; leaving staged", recovered_id)
+            # Once per process, not on every periodic sweep.
+            log = logger.debug if recovered_id in self._warned_uncertain else logger.warning
+            self._warned_uncertain.add(recovered_id)
+            log("job %s needs explicit delivery retry; leaving staged", recovered_id)
             return None
-        raw_metadata: dict = extract_pdf_metadata(pdf_bytes)
         if manifest.get("receipt_id"):
             self.operations.receipt(
                 manifest["receipt_id"],
@@ -889,32 +1123,14 @@ class Pipeline:
                 manifest.get("filename", "document.pdf"),
                 manifest.get("source_name", self.config.source.name),
             )
-        meta_files = [
-            p
-            for p in job_dir.iterdir()
-            if p.name.endswith(self.config.source.metadata_suffix)
-        ]
-        if meta_files:
-            content = _read_bounded(meta_files[0], self.config.limits.max_metadata_bytes)
-            if content is None:
-                logger.warning(
-                    "companion %s exceeds limits.max_metadata_bytes — ignoring it",
-                    meta_files[0].name,
-                )
-            else:
-                try:
-                    raw_metadata = {**raw_metadata, **self.metadata_parser.parse(content)}
-                except Exception as exc:
-                    logger.warning("metadata parse failed resuming %s: %s", recovered_id, exc)
-
         ctx = JobContext(
             job_id=recovered_id,
             received_at=datetime.fromisoformat(manifest["received_at"]) if manifest.get("received_at") else datetime.fromtimestamp(staged_pdf.stat().st_mtime, UTC),
-            source_name=self.config.source.name,
+            source_name=manifest.get("source_name", self.config.source.name),
             staging_dir=job_dir,
             pdf_path=staged_pdf,
             pdf_sha256=hashlib.sha256(pdf_bytes).hexdigest(),
-            metadata=allowlist(raw_metadata, self.config.source.metadata_fields),
+            metadata=self._staged_metadata(job_dir, manifest, pdf_bytes),
         )
         if not manifest.get("assessment"):
             # No extraction done yet — this is either a genuinely fresh

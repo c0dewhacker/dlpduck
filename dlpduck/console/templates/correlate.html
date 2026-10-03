@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}Correlate — DLPDuck{% endblock %}
+{% block content %}
+<div class="pagehead"><h1>Correlate a value</h1></div>
+<p class="note">Every document in which the same sensitive value was found, from the masked hits in the permanent index &mdash; the value itself is never stored, and this still works after a document's text has been purged.</p>
+
+{% if can_lookup_value %}
+<form class="filters" method="post" action="/correlate" autocomplete="off">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <div class="filter-field"><label for="value">Value</label><input id="value" type="password" name="value" maxlength="256" placeholder="e.g. a card or account number" style="min-width:260px;"></div>
+  <button type="submit" class="btn btn-primary">Look up</button>
+</form>
+{% endif %}
+
+{% if error %}<p class="note" style="color:var(--crit);">{{ error }}</p>{% endif %}
+
+{% if result is not none %}
+<form class="filters" method="get" action="/correlate">
+  <input type="hidden" name="hmac" value="{{ filters.hmac }}">
+  <div class="filter-field"><label for="start">From (UTC)</label><input id="start" type="date" name="start" value="{{ filters.start or '' }}"></div>
+  <div class="filter-field"><label for="end">Through (UTC)</label><input id="end" type="date" name="end" value="{{ filters.end or '' }}"></div>
+  <button type="submit" class="btn">Filter</button>
+  {% if result.hits %}<a class="btn btn-ghost" href="{{ export_url }}">Export CSV</a>{% endif %}
+</form>
+<p class="note mono">digest {{ result.match_hmac }}</p>
+  {% if not result.hits %}
+  <p class="note">No current assessment holds this value.</p>
+  {% else %}
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Received</th><th>Job</th><th>Disposition</th><th>Rule</th><th>Severity</th><th>Where</th><th>Masked</th></tr></thead>
+    <tbody>
+      {% for h in result.hits %}
+      <tr>
+        <td class="mono">{{ h.received_at }}</td>
+        <td class="mono"><a href="/jobs/{{ h.job_id }}">{{ names.get(h.job_id) or h.job_id[:12] }}</a></td>
+        <td><span class="pill {{ h.disposition }}">{{ h.disposition }}</span></td>
+        <td class="mono">{{ h.rule_id }}</td>
+        <td><span class="chip {{ h.severity|lower }}">{{ h.severity }}</span></td>
+        <td class="mono">p{{ h.page_number }} L{{ h.line_number }}</td>
+        <td class="mono">{{ h.masked_text }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <p class="note">{{ result.hits|length }} hit(s) in {{ result.documents }} document(s){% if result.truncated %} &mdash; more on the next page{% endif %}.</p>
+  {% endif %}
+{% endif %}
+{% include "_pagination.html" %}
+{% endblock %}

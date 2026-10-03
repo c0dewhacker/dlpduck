@@ -39,12 +39,10 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Literal
-
-import duckdb
 
 from dlpduck.content import read_document_text, write_content_row
 from dlpduck.disposition import decide
@@ -52,11 +50,26 @@ from dlpduck.durability import move_durably, write_atomically
 from dlpduck.engine import DLPEngine
 from dlpduck.index import AssessmentExists, write_row
 from dlpduck.operations import serialized
-from dlpduck.types import DLPHit, DocumentText, JobContext, TextLine
+from dlpduck.search import IndexFilters, run_query
+from dlpduck.types import (
+    DLPHit,
+    DocumentText,
+    JobContext,
+    RuleBudgetExceeded,
+    TextLine,
+    hit_record,
+)
 
 logger = logging.getLogger("dlpduck.reprocess")
 
-Direction = Literal["escalate", "deescalate", "changed", "unchanged", "content_unavailable"]
+# Index reads had no time bound at all, so a slow store could hold a
+# console request (or the watcher's duplicate check) indefinitely. Generous,
+# because these are the reads everything else depends on.
+INDEX_QUERY_SECONDS = 120.0
+
+Direction = Literal[
+    "escalate", "deescalate", "changed", "unchanged", "content_unavailable", "error"
+]
 Mode = Literal["rules", "extract"]
 MODES: tuple[Mode, ...] = ("rules", "extract")
 
@@ -126,15 +139,8 @@ def index_stats(index_root: Path, today: date) -> dict:
             count(*) FILTER (WHERE release_pending)
         FROM current
     """
-    con = duckdb.connect()
-    try:
-        con.execute("SET TimeZone='UTC'")  # same reason as latest_index_rows
-        counted = con.execute(sql, [glob, today]).fetchone()
-        if counted is None:  # an ungrouped aggregate always returns a row
-            return empty
-        total, today_count, quarantined, pending = counted
-    finally:
-        con.close()
+    [counted] = run_query(sql, [glob, today], INDEX_QUERY_SECONDS)
+    total, today_count, quarantined, pending = counted
     return {
         "total": total,
         "today": today_count,
@@ -153,6 +159,7 @@ def latest_index_rows(
     disposition: str | None = None,
     release_pending: bool = False,
     offset: int = 0,
+    filters: IndexFilters | None = None,
 ) -> list[dict]:
     """The current assessment per job — the highest assessment_seq for
     each job_id. With no is_current flag to synchronize, this remains
@@ -191,12 +198,18 @@ def latest_index_rows(
     # coming back NULL instead of the whole query failing. Without it the
     # first schema addition makes every historical row unreadable, and the
     # index is the one store that is meant to be permanent.
-    outer_filters = []
-    if disposition:
-        outer_filters.append("disposition = ?")
-        params.append(disposition)
-    if release_pending:
-        outer_filters.append("release_pending = true")
+    # Filters on the CURRENT assessment apply after the latest row per job
+    # is chosen — filtering first would surface an older assessment of a
+    # job whose newest one doesn't match.
+    filters = filters or IndexFilters()
+    if disposition or release_pending:
+        filters = replace(
+            filters,
+            disposition=disposition or filters.disposition,
+            release_pending=release_pending or filters.release_pending,
+        )
+    outer_filters, outer_params = filters.sql("cur")
+    params.extend(outer_params)
     outer_sql = "WHERE " + " AND ".join(outer_filters) if outer_filters else ""
     sql = f"""
         WITH current AS (
@@ -204,25 +217,16 @@ def latest_index_rows(
         FROM read_parquet(?, hive_partitioning = true, union_by_name = true)
         {where_sql}
         QUALIFY row_number() OVER (PARTITION BY job_id ORDER BY assessment_seq DESC) = 1
-        ) SELECT * FROM current {outer_sql}
+        ) SELECT * FROM current AS cur {outer_sql}
         ORDER BY received_at {"DESC" if newest_first else "ASC"}, job_id
         {"LIMIT ?" if limit is not None else ""}
         OFFSET ?
     """
-    con = duckdb.connect()
-    try:
-        # DuckDB defaults its session TimeZone to the LOCAL system zone and
-        # silently converts TIMESTAMPTZ columns on read. received_at was
-        # written as raw UTC (datetime.now(timezone.utc)) and its .date()
-        # is what chose the dt= partition — reading it back local-shifted
-        # would compute a different date near local midnight and put a
-        # reassessment in the wrong partition. Pin UTC so round-tripping a
-        # timestamp through DuckDB always agrees with how it was written.
-        con.execute("SET TimeZone='UTC'")
-        bound = [glob, *params] + ([limit] if limit is not None else []) + [offset]
-        rows = con.execute(sql, bound).fetchall()
-    finally:
-        con.close()
+    # run_query pins the session to UTC: received_at was written as UTC and
+    # its .date() chose the dt= partition, so reading it local-shifted would
+    # put a reassessment in the wrong partition near midnight.
+    bound = [glob, *params] + ([limit] if limit is not None else []) + [offset]
+    rows = run_query(sql, bound, INDEX_QUERY_SECONDS)
     return [dict(zip(_INDEX_COLUMNS, r, strict=True)) for r in rows]
 
 
@@ -236,6 +240,8 @@ class ReassessmentOutcome:
     new_severity: str | None
     old_hit_count: int
     new_hit_count: int
+    # Set when direction is "error": why this job could not be reassessed.
+    detail: str | None = None
 
 
 @dataclass
@@ -287,7 +293,8 @@ class Reprocessor:
         self, row: dict, mode: Mode = "rules"
     ) -> tuple[ReassessmentOutcome, list[DLPHit] | None, str | None, DocumentText | None]:
         """Returns (outcome, new_hits, new_disposition, text) — the last
-        three are None exactly when direction is "content_unavailable",
+        three are None exactly when direction is "content_unavailable" or
+        "error",
         and `text` is otherwise only populated in "extract" mode (the
         caller uses it to refresh the content store; "rules" mode has
         nothing new to write there).
@@ -307,7 +314,18 @@ class Reprocessor:
             if text is None:
                 return self._unavailable(row), None, None, None
 
-        new_hits = self.engine.scan(text)
+        try:
+            new_hits = self.engine.scan(text)
+        except RuleBudgetExceeded as exc:
+            # One slow rule on one document used to abort the whole batch
+            # mid-way, with a reprocess.started and no reprocess.completed.
+            # Reported per job instead, and nothing is written for it: a
+            # verdict the current ruleset could not finish reaching is not
+            # a verdict, in either direction.
+            return self._error(row, f"rule {exc.rule_id} exceeded its time budget"), None, None, None
+        except Exception as exc:
+            logger.exception("reprocess: scanning job %s raised", job_id)
+            return self._error(row, f"scan failed: {type(exc).__name__}"), None, None, None
         # A degraded extraction stays fail-closed under reprocessing too.
         # "rules" mode never re-examines extraction quality — it can't,
         # it doesn't touch the PDF — so it must not be able to launder a
@@ -329,8 +347,7 @@ class Reprocessor:
         old_disposition = row["disposition"]
         if old_disposition == new_disposition:
             same_hits = (
-                row["hits"]
-                == [{**asdict(h), "severity": h.severity.value} for h in new_hits]
+                row["hits"] == [hit_record(h) for h in new_hits]
                 and row["ruleset_version"] == self.ruleset_version
                 and (mode != "extract" or (
                     row["page_count"] == text.page_count
@@ -357,6 +374,19 @@ class Reprocessor:
             new_hit_count=len(new_hits),
         )
         return outcome, new_hits, new_disposition, (text if mode == "extract" else None)
+
+    def _error(self, row: dict, detail: str) -> ReassessmentOutcome:
+        return ReassessmentOutcome(
+            job_id=row["job_id"],
+            direction="error",
+            old_disposition=row["disposition"],
+            new_disposition=None,
+            old_severity=row["highest_severity"],
+            new_severity=None,
+            old_hit_count=row["hit_count"],
+            new_hit_count=0,
+            detail=detail,
+        )
 
     def _unavailable(self, row: dict) -> ReassessmentOutcome:
         return ReassessmentOutcome(
@@ -427,6 +457,15 @@ class Reprocessor:
 
             if outcome.direction == "content_unavailable":
                 continue
+            if outcome.direction == "error":
+                self.audit.append(
+                    "job.reassessment_failed",
+                    job_id=outcome.job_id,
+                    ruleset_version=self.ruleset_version,
+                    mode=mode,
+                    detail=outcome.detail,
+                )
+                continue
 
             if outcome.direction == "unchanged":
                 if fresh_text is not None:
@@ -461,6 +500,7 @@ class Reprocessor:
             escalated=summary.count("escalate"),
             deescalated=summary.count("deescalate"),
             content_unavailable=summary.count("content_unavailable"),
+            errors=summary.count("error"),
         )
         logger.debug(
             "reprocess (mode=%s) done: %d written, %d escalated, %d deescalated, %d unavailable",
@@ -542,23 +582,7 @@ class Reprocessor:
         if direction == "escalate":
             archive_path = self._destination_path(job_id, prior["received_at"], archive_path, self.destination.quarantine)
 
-        hits_payload = [
-            {
-                "rule_id": h.rule_id,
-                "rule_name": h.rule_name,
-                "severity": h.severity.value,
-                "action": h.action,
-                "page_number": h.page_number,
-                "line_number": h.line_number,
-                "line_on_page": h.line_on_page,
-                "start": h.start,
-                "end": h.end,
-                "masked_text": h.masked_text,
-                "match_hmac": h.match_hmac,
-                "validator": h.validator,
-            }
-            for h in new_hits
-        ]
+        hits_payload = [hit_record(h) for h in new_hits]
         highest = max((h.severity for h in new_hits), key=lambda s: s.rank) if new_hits else None
 
         row = {
@@ -600,6 +624,17 @@ class Reprocessor:
         })
 
     def _destination_path(self, job_id, received_at, current_path, into):
+        """Where a move into `into` will leave this job's PDF.
+
+        The move happens before the index row that records it, so a crash
+        between the two leaves the file already at the destination while
+        the index still names the old place. Looking only at
+        `current_path` cannot tell that apart from "the document is gone",
+        and answering "gone" wrote the stale path into the new assessment —
+        after which the console could never serve the document again. So
+        the destination counts too. With neither on disk (hard-purged) the
+        logical change is still recorded and the path is left as it was.
+        """
         dest = into / f"dt={received_at.date().isoformat()}" / f"{job_id}.pdf"
         return str(dest) if Path(current_path).is_file() or dest.is_file() else current_path
 
@@ -610,9 +645,19 @@ class Reprocessor:
         payload = {"prior_path": prior["archive_path"], "row": row,
                    "text": asdict(text) if text is not None else None, "event": event}
         write_atomically(path, json.dumps(payload, default=lambda v: v.isoformat()))
-        self._apply_transition(path, payload)
+        self._apply_transition(path, payload, recovering=False)
 
-    def _apply_transition(self, path, payload):
+    def _apply_transition(self, path, payload, *, recovering: bool = True):
+        """Carry out a recorded transition. Every step is safe to repeat,
+        which is what lets a crash anywhere in here be finished later.
+
+        The audit event is the one step that cannot simply be re-run, so
+        whether it already happened is checked against the trail — but
+        only when `recovering` a transition an earlier process left behind.
+        Applied straight after being written, nothing can have appended it
+        yet, and checking meant scanning the whole audit history for every
+        reassessment and release.
+        """
         row = payload["row"]
         for key in ("received_at", "assessed_at"):
             if isinstance(row[key], str):
@@ -629,8 +674,16 @@ class Reprocessor:
             write_row(self.index_root, row, dt=row["received_at"].date(), job_id=row["job_id"],
                       assessment_seq=row["assessment_seq"], exclusive=True)
         event = payload["event"]
-        if not any(e.get("to_assessment_seq") == row["assessment_seq"] and e.get("event") == event["event"]
-                   for e in self.audit.events_for_job(row["job_id"])):
+        already = recovering and any(
+            e.get("to_assessment_seq") == row["assessment_seq"] and e.get("event") == event["event"]
+            for e in self.audit.events_for_job(
+                row["job_id"],
+                # The transition file is written before the event can be,
+                # so nothing older than it needs reading.
+                since=datetime.fromtimestamp(path.stat().st_mtime, UTC).date(),
+            )
+        )
+        if not already:
             self.audit.append(event["event"], **{key: value for key, value in event.items() if key != "event"})
         path.unlink()
 
@@ -658,47 +711,4 @@ class Reprocessor:
                 metadata={},
                 text=text,
             ),
-        )
-
-    def _relocate_pdf(
-        self, job_id: str, received_at: datetime, current_path: str, into: Path
-    ) -> str:
-        """Move a job's PDF into `into`, and return where it now is.
-
-        Shared by escalation (→ quarantine) and release (→ archive), which
-        are the same operation pointed in opposite directions and were
-        drifting apart as two copies.
-
-        Safe to repeat, which matters because the move happens before the
-        index row that records it: a crash in that gap leaves the file
-        already at the destination while the index still names the old
-        location. Reading only `current_path` cannot tell that apart from
-        "the document is gone", and answering "gone" writes the stale path
-        into the new assessment — after which the console can never serve
-        that document again, permanently, even though the file is sitting
-        right there. So the destination is checked too.
-        """
-        src = Path(current_path)
-        partition = into / f"dt={received_at.date().isoformat()}"
-        dest = partition / f"{job_id}.pdf"
-
-        if not src.is_file():
-            if dest.is_file():
-                return str(dest)  # the move already happened; adopt it
-            # Genuinely gone (e.g. hard-purged) but its content wasn't —
-            # evaluate() already required content to exist, so this is an
-            # inconsistent-but-survivable state. Record the logical
-            # change; there is no file left to move.
-            return current_path
-
-        partition.mkdir(parents=True, exist_ok=True)
-        # shutil.move, not Path.replace — archive and quarantine are
-        # deliberately recommended to sit on separate mounts for ACL
-        # separation, and a plain rename() raises across filesystems.
-        move_durably(src, dest)
-        return str(dest)
-
-    def _move_to_quarantine(self, job_id: str, received_at: datetime, current_path: str) -> str:
-        return self._relocate_pdf(
-            job_id, received_at, current_path, self.destination.quarantine
         )

@@ -232,7 +232,64 @@ class TestRuleValidationRejectsBadConfig:
             load_ruleset([{"include": str(tmp_path / "nope.yaml")}], tmp_path)
 
 
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [("severity", "SEVERE"), ("mask_keep", "four"), ("mask_keep", -1),
+         ("min_line", "3"), ("max_line", 2.5), ("min_line", True)],
+    )
+    def test_a_badly_typed_setting_names_the_rule(self, tmp_path, field, value):
+        """These used to raise a bare ValueError — or load fine and then
+        raise TypeError comparing positions on the first document."""
+        with pytest.raises(RuleConfigError, match="a.b"):
+            load_ruleset([{"id": "a.b", "name": "A", "pattern": "x", field: value}], tmp_path)
+
+    def test_an_inverted_window_is_refused(self, tmp_path):
+        with pytest.raises(RuleConfigError, match="never match"):
+            load_ruleset(
+                [{"id": "a.b", "name": "A", "pattern": "x", "min_line": 5, "max_line": 2}],
+                tmp_path,
+            )
+
+    def test_requires_context_without_a_pattern_is_refused(self, tmp_path):
+        with pytest.raises(RuleConfigError, match="requires_context"):
+            load_ruleset(
+                [{"id": "a.b", "name": "A", "pattern": "x", "requires_context": {"within_lines": 1}}],
+                tmp_path,
+            )
+
+    def test_an_include_cycle_is_refused_not_recursed(self, tmp_path):
+        _write(tmp_path, "a.yaml", "rules:\n  - include: b.yaml\n")
+        _write(tmp_path, "b.yaml", "rules:\n  - include: a.yaml\n")
+        with pytest.raises(RuleConfigError, match="cycle"):
+            load_ruleset([{"include": str(tmp_path / "a.yaml")}], tmp_path)
+
+    def test_the_same_file_included_twice_side_by_side_is_fine(self, tmp_path):
+        shared = _write(tmp_path, "shared.yaml", "rules:\n  - {id: s, name: S, pattern: x}\n")
+        rules = load_ruleset([{"include": str(shared)}, {"include": str(shared)}], tmp_path)
+        assert [r.id for r in rules] == ["s"]
+
+
 class TestDocumentScopedLineWindows:
+    def test_a_document_scope_rule_honours_its_window(self, tmp_path):
+        """The window used to be skipped for document-scope rules, so a
+        banner rule limited to the top of the page matched anywhere."""
+        from dlpduck.engine import DLPEngine
+        from dlpduck.types import DocumentText, TextLine
+
+        rules = load_ruleset(
+            [{"id": "a.b", "name": "A", "pattern": "SECRET", "scope": "document",
+              "line_scope": "page", "min_line": 0, "max_line": 0}],
+            tmp_path,
+        )
+        doc = DocumentText(page_count=1)
+        for n, text in enumerate(["SECRET banner", "body", "SECRET in the body"]):
+            doc.add_line(TextLine(line_number=n, page_number=1, line_on_page=n,
+                                  lines_on_page=3, text=text, source="native"))
+
+        hits = DLPEngine(rules, hmac_key=b"k").scan(doc)
+
+        assert [h.line_number for h in hits] == [0]
+
     def test_document_scope_counts_lines_from_the_document_start(self, tmp_path):
         from dlpduck.types import TextLine
 

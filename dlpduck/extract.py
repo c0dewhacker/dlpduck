@@ -11,7 +11,7 @@ from pypdfium2 import raw as pdfium_c
 from rapidocr_onnxruntime import RapidOCR
 
 from dlpduck.pdfium import PDFIUM_LOCK, is_password_error, open_document
-from dlpduck.types import DocumentText, EncryptedDocument, PageTooLarge, TextLine
+from dlpduck.types import DocumentText, EncryptedDocument, PageTooLarge, TextLine, TooManyPages
 
 logger = logging.getLogger("dlpduck.extract")
 
@@ -22,7 +22,24 @@ class _Box:
     cy: float
     height: float
     text: str
-    score: float
+    score: float | None  # OCR confidence; None for a native text run
+    x1: float = 0.0
+    top: float = 0.0
+    bottom: float = 0.0
+
+
+@dataclass(frozen=True)
+class _Row:
+    text: str
+    source: str  # "native" | "ocr"
+    confidence: float | None
+
+
+@dataclass(frozen=True)
+class _PageResult:
+    rows: list[_Row]
+    kind: str  # "native" | "ocr" | "mixed" | "blank"
+    confidence: float | None  # mean OCR confidence over the page, if OCR ran
 
 
 class LineExtractor:
@@ -37,10 +54,37 @@ class LineExtractor:
     MAX_RASTER_PIXELS = 40_000_000  # ~40MP, about 120MB of RGB pixels
     MIN_DPI = 36  # below this OCR is worthless anyway — refuse instead
 
-    def __init__(self, dpi: int = 150, *, isolate: bool = False, timeout: float = 120):
+    # A page OCR reads nothing from is degraded — unless it is genuinely
+    # blank. "Genuinely" is measured, not assumed: at most this fraction of
+    # the rendered page may be dark. The default is deliberately tight —
+    # about 200 pixels on an A4 page at 150 dpi, less ink than a nine-digit
+    # identifier — so a page carrying a short value OCR failed to read still
+    # fails closed; it exists for the blank backs of duplex scans, which
+    # used to quarantine every such document as degraded. 0 restores the old
+    # behaviour of treating every empty page as degraded.
+    BLANK_MAX_INK = 0.0001
+    _INK_LEVEL = 128  # a pixel darker than this (0-255) counts as ink
+
+    def __init__(
+        self,
+        dpi: int = 150,
+        *,
+        isolate: bool = False,
+        timeout: float = 120,
+        max_pages: int | None = None,
+        memory_mb: int | None = None,
+        blank_max_ink: float | None = None,
+    ):
         self.dpi = dpi
+        if blank_max_ink is not None:
+            self.BLANK_MAX_INK = blank_max_ink
         self.isolate = isolate
         self.timeout = timeout
+        # Checked on open, before any page is rendered, and inside the
+        # worker when isolated — counting pages means parsing the PDF,
+        # which is exactly the work that must not happen in the daemon.
+        self.max_pages = max_pages
+        self.memory_mb = memory_mb
         # One page per worker process at the pipeline level — stop
         # ONNXRuntime grabbing every core inside every worker and fighting
         # the pool for them.
@@ -50,7 +94,11 @@ class LineExtractor:
         if self.isolate:
             from dlpduck.extract_worker import extract_isolated
 
-            return extract_isolated(pdf_bytes, self.dpi, self.NATIVE_MIN_CHARS, self.timeout)
+            return extract_isolated(
+                pdf_bytes, self.dpi, self.NATIVE_MIN_CHARS, self.timeout,
+                max_pages=self.max_pages, memory_mb=self.memory_mb,
+                blank_max_ink=self.BLANK_MAX_INK,
+            )
         return self._extract(pdf_bytes)
 
     def _extract(self, pdf_bytes: bytes) -> DocumentText:
@@ -63,12 +111,14 @@ class LineExtractor:
                 raise
 
             with document:
+                if self.max_pages is not None and len(document) > self.max_pages:
+                    raise TooManyPages(len(document))
                 out = DocumentText(page_count=len(document))
                 n = 0
                 for idx in range(len(document)):
                     page = document[idx]
                     try:
-                        rows, source, conf = self._page_rows(page)
+                        result = self._page_rows(page)
                     except Exception:
                         logger.debug("page %d failed to extract", idx + 1, exc_info=True)
                         out.degraded = True  # -> quarantine, never silently drop a page
@@ -76,25 +126,29 @@ class LineExtractor:
                         continue
                     finally:
                         page.close()
-                    if not rows:
+                    rows = result.rows
+                    if result.kind == "blank":
+                        out.blank_page_count += 1
+                    elif not rows:
                         out.degraded = True
-                    if source == "ocr":
+                    if result.kind in ("ocr", "mixed", "blank"):
                         out.ocr_page_count += 1
                     logger.debug(
                         "page %d: %s, %d line(s)%s",
-                        idx + 1, source, len(rows),
-                        f", confidence={conf:.2f}" if conf is not None else "",
+                        idx + 1, result.kind, len(rows),
+                        f", confidence={result.confidence:.2f}"
+                        if result.confidence is not None else "",
                     )
-                    for on_page, text in enumerate(rows):
+                    for on_page, row in enumerate(rows):
                         out.add_line(
                             TextLine(
                                 line_number=n,
                                 page_number=idx + 1,
                                 line_on_page=on_page,
                                 lines_on_page=len(rows),
-                                text=text,
-                                source=source,
-                                confidence=conf,
+                                text=row.text,
+                                source=row.source,
+                                confidence=row.confidence,
                             )
                         )
                         n += 1
@@ -128,42 +182,112 @@ class LineExtractor:
             )
         return reduced
 
-    def _page_rows(self, page) -> tuple[list[str], str, float | None]:
+    def _page_rows(self, page) -> _PageResult:
+        has_images = any(page.get_objects(filter=[pdfium_c.FPDF_PAGEOBJ_IMAGE]))
+        rotation = page.get_rotation()
+        native_boxes: list[_Box] = []
         text_page = page.get_textpage()
         try:
-            native = [line.strip() for line in text_page.get_text_bounded().splitlines() if line.strip()]
+            native = [
+                line.strip() for line in text_page.get_text_bounded().splitlines() if line.strip()
+            ]
+            enough_native = sum(len(line) for line in native) >= self.NATIVE_MIN_CHARS
+            # Positioned native runs, only for a page that also has images:
+            # those rows have to be interleaved with what OCR finds in them.
+            # Not collected otherwise — it is a text query per run, and most
+            # pages are plain native text that never needs it.
+            if enough_native and has_images and rotation == 0:
+                native_boxes = self._native_boxes(page, text_page)
         finally:
             text_page.close()
         # PDFium reports bounded text bottom-to-top for quarter-turn pages.
         # Restore the content order used by unrotated and other rotated pages.
-        if page.get_rotation() == 90:
+        if rotation == 90:
             native.reverse()
-        has_images = any(page.get_objects(filter=[pdfium_c.FPDF_PAGEOBJ_IMAGE]))
-        if sum(len(line) for line in native) >= self.NATIVE_MIN_CHARS and not has_images:
-            return native, "native", None
+        if enough_native and not has_images:
+            return _PageResult([_Row(t, "native", None) for t in native], "native", None)
 
-        bitmap = page.render(scale=self._safe_dpi(page) / 72)
+        scale = self._safe_dpi(page) / 72
+        bitmap = page.render(scale=scale)
         if self._ocr is None:
             self._ocr = RapidOCR(intra_op_num_threads=1, inter_op_num_threads=1)
         try:
-            result, _ = self._ocr(bitmap.to_numpy())
+            pixels = bitmap.to_numpy()
+            result, _ = self._ocr(pixels)
+            ink = self._ink_ratio(pixels) if not result else None
         finally:
             bitmap.close()
-        if not result:
-            return [], "ocr", None
 
-        boxes = [
+        ocr_boxes = [
             _Box(
-                x0=bbox[0][0],
-                cy=sum(p[1] for p in bbox) / 4,
-                height=max(p[1] for p in bbox) - min(p[1] for p in bbox),
+                x0=min(p[0] for p in bbox) / scale,
+                x1=max(p[0] for p in bbox) / scale,
+                top=min(p[1] for p in bbox) / scale,
+                bottom=max(p[1] for p in bbox) / scale,
+                cy=sum(p[1] for p in bbox) / 4 / scale,
+                height=(max(p[1] for p in bbox) - min(p[1] for p in bbox)) / scale,
                 text=txt,
                 score=score,
             )
-            for bbox, txt, score in result
+            for bbox, txt, score in (result or [])
         ]
-        conf = sum(b.score for b in boxes) / len(boxes)
-        return self._cluster_rows(boxes), "ocr", conf
+        conf = sum(b.score or 0.0 for b in ocr_boxes) / len(ocr_boxes) if ocr_boxes else None
+
+        # A page with real native text AND images: keep the native text —
+        # exact, where OCR of the same glyphs is an approximation — and
+        # add only what OCR read from outside it, i.e. text that lives in
+        # the images. This used to discard the native layer entirely and
+        # rely on OCR for the whole page, so a logo on a letterhead was
+        # enough to downgrade every line to an OCR guess.
+        if native_boxes:
+            extra = [b for b in ocr_boxes if not any(_overlaps(b, n) for n in native_boxes)]
+            rows = self._cluster(native_boxes + extra)
+            return _PageResult(rows, "mixed" if extra else "native", conf if extra else None)
+
+        if not ocr_boxes:
+            if ink is not None and self.BLANK_MAX_INK > 0 and ink <= self.BLANK_MAX_INK:
+                return _PageResult([], "blank", None)
+            return _PageResult([], "ocr", None)
+        return _PageResult(
+            [_Row(t, "ocr", conf) for t in self._cluster_rows(ocr_boxes)], "ocr", conf
+        )
+
+    @staticmethod
+    def _native_boxes(page, text_page) -> list[_Box]:
+        """Native text runs with their positions, in top-down page points
+        (the same orientation as a rendered bitmap)."""
+        height = page.get_size()[1]
+        boxes = []
+        for index in range(text_page.count_rects()):
+            left, bottom, right, top = text_page.get_rect(index)
+            text = text_page.get_text_bounded(left, bottom, right, top).strip()
+            if not text:
+                continue
+            boxes.append(
+                _Box(
+                    x0=left, x1=right, top=height - top, bottom=height - bottom,
+                    cy=height - (top + bottom) / 2, height=top - bottom, text=text, score=None,
+                )
+            )
+        return boxes
+
+    def _ink_ratio(self, pixels) -> float:
+        gray = pixels.mean(axis=2) if pixels.ndim == 3 else pixels
+        return float((gray < self._INK_LEVEL).mean())
+
+    def _cluster(self, boxes: list[_Box]) -> list[_Row]:
+        """Rows from a mix of native and OCR boxes. A row is native only if
+        every part of it is; otherwise it is an OCR row carrying the mean
+        confidence of its OCR parts."""
+        rows = []
+        for row in self._group(boxes):
+            scores = [b.score for b in row if b.score is not None]
+            text = " ".join(b.text for b in sorted(row, key=lambda b: b.x0)).strip()
+            if scores:
+                rows.append(_Row(text, "ocr", sum(scores) / len(scores)))
+            else:
+                rows.append(_Row(text, "native", None))
+        return rows
 
     @staticmethod
     def _cluster_rows(boxes: list[_Box], tol_ratio: float = 0.5) -> list[str]:
@@ -174,14 +298,21 @@ class LineExtractor:
         label and its value land on different "lines" and no rule spanning
         the pair can ever match.
         """
+        return [
+            " ".join(b.text for b in sorted(row, key=lambda b: b.x0)).strip()
+            for row in LineExtractor._group(boxes, tol_ratio)
+        ]
+
+    @staticmethod
+    def _group(boxes: list[_Box], tol_ratio: float = 0.5) -> list[list[_Box]]:
         if not boxes:
-            # Unreachable from _page_rows, which returns early on an empty
-            # OCR result — but the indexing below assumes a first box, and
-            # a caller that doesn't know that shouldn't get an IndexError.
+            # The indexing below assumes a first box, and a caller that
+            # doesn't know that shouldn't get an IndexError.
             return []
 
         heights = sorted(b.height for b in boxes if b.height > 0) or [12.0]
-        tol = max(4.0, heights[len(heights) // 2] * tol_ratio)
+        # Positions are in page points (≈2 px at 150 dpi).
+        tol = max(2.0, heights[len(heights) // 2] * tol_ratio)
 
         ordered = sorted(boxes, key=lambda b: b.cy)
         rows: list[list[_Box]] = []
@@ -195,8 +326,20 @@ class LineExtractor:
                 rows.append(current)
                 current = [b]
         rows.append(current)
+        return rows
 
-        return [
-            " ".join(b.text for b in sorted(row, key=lambda b: b.x0)).strip()
-            for row in rows
-        ]
+
+def _overlaps(a: _Box, b: _Box) -> bool:
+    """Do two boxes cover substantially the same area? Used to drop OCR
+    output that merely re-reads native text. Measured against the smaller
+    of the two: an OCR box is padded well beyond the glyph extents PDFium
+    reports for the same run, so "half of the OCR box" missed real
+    re-reads and duplicated the line."""
+    width = min(a.x1, b.x1) - max(a.x0, b.x0)
+    height = min(a.bottom, b.bottom) - max(a.top, b.top)
+    if width <= 0 or height <= 0:
+        return False
+    smaller = max(
+        min((a.x1 - a.x0) * (a.bottom - a.top), (b.x1 - b.x0) * (b.bottom - b.top)), 1e-6
+    )
+    return width * height / smaller > 0.5

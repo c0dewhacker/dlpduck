@@ -253,3 +253,38 @@ class TestLocalFallbackCoexistsWithOidc:
         oidc_client.get("/auth/callback")
 
         assert local_client.get("/access").status_code == oidc_client.get("/access").status_code == 200
+
+
+class TestOidcClaimsAreReadCarefully:
+    def test_a_single_role_sent_as_a_string_is_honoured(self, oidc_env):
+        """Iterating "viewer" as a list granted nothing, one letter at a time."""
+        client = oidc_env["client"]
+        client.app.state.oauth.oidc.authorize_access_token = _stub_token(
+            {"preferred_username": "solo", "roles": "viewer"}
+        )
+        resp = client.get("/auth/callback", follow_redirects=False)
+        assert resp.status_code == 303
+        assert client.get("/jobs").status_code == 200
+
+    def test_a_username_that_is_also_a_local_account_is_refused(self, oidc_env):
+        """Otherwise an IdP user who named themselves "breakglass" would be
+        indistinguishable from the break-glass admin in every audit event."""
+        client = oidc_env["client"]
+        client.app.state.oauth.oidc.authorize_access_token = _stub_token(
+            {"preferred_username": "breakglass", "sub": "abc-123", "roles": ["viewer"]}
+        )
+        resp = client.get("/auth/callback", follow_redirects=False)
+
+        assert resp.status_code == 403
+        [event] = [e for e in oidc_env["pipeline"].audit.events() if e["event"] == "auth.failed"]
+        assert event["reason"] == "username_collides_with_local_account"
+        assert event["subject"] == "abc-123"
+
+    def test_a_successful_login_records_the_stable_subject(self, oidc_env):
+        client = oidc_env["client"]
+        client.app.state.oauth.oidc.authorize_access_token = _stub_token(
+            {"preferred_username": "alice", "sub": "f00", "iss": "https://idp", "roles": ["viewer"]}
+        )
+        client.get("/auth/callback")
+        [event] = [e for e in oidc_env["pipeline"].audit.events() if e["event"] == "auth.succeeded"]
+        assert (event["subject"], event["issuer"]) == ("f00", "https://idp")

@@ -261,7 +261,12 @@ def test_nonpositive_processing_limits_rejected(pipeline, section, field, value)
 
 def test_empty_page_in_multpage_document_is_incomplete(monkeypatch):
     extractor = LineExtractor()
-    calls = iter([(["ordinary native text"], "native", None), ([], "ocr", None)])
+    from dlpduck.extract import _PageResult, _Row
+
+    calls = iter([
+        _PageResult([_Row("ordinary native text", "native", None)], "native", None),
+        _PageResult([], "ocr", None),  # OCR read nothing and the page is not blank
+    ])
     monkeypatch.setattr(extractor, "_page_rows", lambda _: next(calls))
     assert extractor.extract(blank_pdf([(595, 842), (595, 842)])).degraded
 
@@ -271,14 +276,16 @@ def test_native_heading_does_not_skip_image_ocr(monkeypatch):
     page = Mock()
     text_page = page.get_textpage.return_value
     text_page.get_text_bounded.return_value = "Long native heading above an image"
+    text_page.count_rects.return_value = 0  # no positioned runs: OCR the whole page
+    page.get_size.return_value = (595, 842)
     page.get_rotation.return_value = 0
     page.get_objects.return_value = [Mock()]
     bitmap = page.render.return_value
     bitmap.to_numpy.return_value = Mock()
     monkeypatch.setattr(extractor, "_safe_dpi", lambda _: 150)
     extractor._ocr = Mock(return_value=([([[0, 0], [100, 0], [100, 20], [0, 20]], "SECRET", .99)], None))
-    rows, source, _ = extractor._page_rows(page)
-    assert "SECRET" in rows and source == "ocr"
+    result = extractor._page_rows(page)
+    assert "SECRET" in [row.text for row in result.rows] and result.kind == "ocr"
     extractor._ocr.assert_called_once()
 
 
@@ -313,3 +320,70 @@ def test_isolated_worker_timeout_is_reported(monkeypatch):
 def test_isolated_worker_reads_real_pdf():
     result = extract_isolated(make_pdf([["Native document through an isolated worker"]]), 150, 20, 20)
     assert "isolated worker" in result.full_text
+
+
+def test_routine_commits_and_reassessments_do_not_scan_the_audit_trail(pipeline, monkeypatch):
+    """Checking the trail for an already-appended event used to happen on
+    every commit and every transition — a read of the whole history per
+    document, growing without bound."""
+    monkeypatch.setattr(
+        pipeline.audit, "events_for_job",
+        Mock(side_effect=AssertionError("scanned the audit trail on the happy path")),
+    )
+    ctx = ingest(pipeline)
+    prior = latest_index_rows(pipeline.index_root)[0]
+    Reprocessor(pipeline)._write_assessment(prior, [], "archive", "changed", document("New text"))
+    assert ctx.disposition
+
+
+def test_a_crash_between_the_completion_event_and_its_checkpoint_is_not_duplicated(
+    pipeline, monkeypatch
+):
+    import dlpduck.pipeline as module
+
+    staging = pipeline.config.destination.work_dir / "_processing"
+    source = pipeline.config.source.path / "doc.pdf"
+    source.write_bytes(make_pdf([["An ordinary document"]]))
+    ctx = pipeline.stage(source, None, staging)
+
+    real_checkpoint = module.Pipeline._checkpoint
+
+    def crash_after_audit(self, job, manifest, step):
+        if step == "audit":
+            raise OSError("power cut")
+        return real_checkpoint(self, job, manifest, step)
+
+    monkeypatch.setattr(module.Pipeline, "_checkpoint", crash_after_audit)
+    with pytest.raises(OSError):
+        pipeline.resume_staged(staging)
+    monkeypatch.setattr(module.Pipeline, "_checkpoint", real_checkpoint)
+
+    pipeline.resume_staged(staging)
+
+    completed = [e for e in pipeline.audit.events_for_job(ctx.job_id) if e["event"] == "job.completed"]
+    assert len(completed) == 1
+
+
+def test_a_purge_is_not_undone_by_recovering_an_interrupted_reassessment(pipeline, monkeypatch):
+    """An extract-mode reassessment that crashed leaves its transition,
+    with the re-extracted text, to finish on the next start. Purging in
+    between used to be reversed by that recovery."""
+    from dlpduck.content import has_content
+
+    ingest(pipeline)
+    prior = latest_index_rows(pipeline.index_root)[0]
+    import dlpduck.reprocess as module
+
+    original = module.write_row
+    monkeypatch.setattr(module, "write_row", Mock(side_effect=OSError("disk unavailable")))
+    with pytest.raises(OSError):
+        Reprocessor(pipeline)._write_assessment(prior, [], "archive", "changed", document("Re-extracted"))
+    monkeypatch.setattr(module, "write_row", original)
+
+    pipeline.purge_content(prior["job_id"], reason="erasure request", actor="admin")
+    Reprocessor(pipeline)  # recovers the pending transition
+
+    assert not has_content(pipeline.content_root, prior["job_id"])
+    assert latest_index_rows(pipeline.index_root)[0]["assessment_seq"] == 2
+    [purged] = [e for e in pipeline.audit.events() if e["event"] == "content.purged"]
+    assert purged["pending_transition_text_dropped"] is True

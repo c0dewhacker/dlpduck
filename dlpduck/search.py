@@ -8,7 +8,8 @@ Because it's an inner join, a job whose content has been purged
 so can never match a search — "make it not searchable" falls straight out
 of the join, with no extra logic required. Its index row is untouched and
 still answers "did this job exist, what did we decide" through other
-means (dlpduck index, the audit trail).
+means (the jobs list, value correlation in dlpduck.correlate, the audit
+trail).
 
 The date range is optional — "when did this arrive?" is usually exactly
 what an investigator doesn't know, and search exists to answer it. Given,
@@ -17,10 +18,13 @@ byte of the large full_text column; omitted, the query scans the whole
 content store, bounded by a wall-clock timeout and a row limit instead of
 being refused outright.
 
-Every value is bound (job_id, severity, dates); the only thing built from
-the raw query string is a server-side regexp_extract pattern made of an
-escaped literal, so there is no SQL injection and no user-supplied regex
-to backtrack on.
+Query syntax (see `parse_query`) is deliberately small: words that must
+all appear, "quoted phrases", and -exclusions. Every term is matched
+case-insensitively, and a phrase matches across any run of whitespace —
+including the line break OCR put in the middle of it. Users never supply
+regex syntax: each term becomes an escaped literal inside a fixed,
+server-authored RE2 pattern (linear time, no backtracking), and every
+value — patterns, dates, filters, globs — is a bound parameter.
 """
 
 from __future__ import annotations
@@ -43,7 +47,9 @@ from dlpduck.types import Severity
 
 logger = logging.getLogger("dlpduck.search")
 SEVERITIES = {s.value for s in Severity}
-MAX_QUERY_CHARS = 128
+DISPOSITIONS = {"archive", "quarantine"}
+MAX_QUERY_CHARS = 256
+MAX_TERMS = 10
 MAX_LIMIT = 1000
 
 
@@ -53,6 +59,50 @@ class SearchError(ValueError):
 
 class QueryTimeout(Exception):
     pass
+
+
+@dataclass(frozen=True)
+class Query:
+    """A parsed search: every `include` term must appear, no `exclude`
+    term may. A term is a tuple of words matched as a phrase."""
+
+    include: tuple[tuple[str, ...], ...]
+    exclude: tuple[tuple[str, ...], ...] = ()
+
+
+_TOKEN = re.compile(r'(-?)(?:"([^"]*)"?|(\S+))')
+
+
+def parse_query(q: str) -> Query:
+    """`invoice "account number" -draft` → must contain "invoice" and the
+    phrase "account number", must not contain "draft".
+
+    An unmatched quote runs to the end of the query rather than being an
+    error; an empty phrase is ignored. A query of only exclusions is
+    refused — it would match nearly everything.
+    """
+    if not q or not q.strip():
+        raise SearchError("query must not be empty")
+    if len(q) > MAX_QUERY_CHARS:
+        raise SearchError(f"search terms are limited to {MAX_QUERY_CHARS} characters")
+    include: list[tuple[str, ...]] = []
+    exclude: list[tuple[str, ...]] = []
+    for negated, phrase, word in _TOKEN.findall(q):
+        words = tuple((phrase if phrase else word).split())
+        if not words:
+            continue
+        (exclude if negated else include).append(words)
+    if not include:
+        raise SearchError("give at least one term to search for, not only exclusions")
+    if len(include) + len(exclude) > MAX_TERMS:
+        raise SearchError(f"at most {MAX_TERMS} terms per search")
+    return Query(tuple(include), tuple(exclude))
+
+
+def _term_pattern(words: tuple[str, ...]) -> str:
+    # Escaped literals only, joined by "any whitespace": a phrase OCR wrapped
+    # onto the next line still matches.
+    return r"\s+".join(re.escape(w) for w in words)
 
 
 @dataclass
@@ -65,6 +115,9 @@ class SearchResult:
     hit_count: int
     archive_path: str
     snippet: str
+    release_pending: bool = False
+    source_name: str | None = None
+    rule_ids: list[str] = field(default_factory=list)
     # Set by the console when the viewer may not see this document's raw
     # text (see app._is_contained). The library itself never withholds —
     # the CLI runs as an OS user with no role to check.
@@ -77,6 +130,64 @@ class SearchResponse:
     elapsed_seconds: float = 0.0
     truncated: bool = False  # hit the row limit — there may be more
     unbounded: bool = False  # no date range was given
+
+
+@dataclass(frozen=True)
+class IndexFilters:
+    """Filters on the current assessment, shared by search, the jobs list
+    and correlation so the three cannot disagree about what "HIGH" or
+    "rule X" means. Every value is validated here and bound later."""
+
+    severity: str | None = None  # exactly this highest severity
+    min_severity: str | None = None  # this highest severity or worse
+    rule_id: str | None = None  # at least one hit from this rule
+    disposition: str | None = None
+    source_name: str | None = None
+    flagged: bool | None = None  # True: has hits; False: has none
+    release_pending: bool = False
+
+    def __post_init__(self) -> None:
+        for name in ("severity", "min_severity"):
+            value = getattr(self, name)
+            if value is not None and value not in SEVERITIES:
+                raise SearchError(
+                    f"unknown severity {value!r} — must be one of {sorted(SEVERITIES)}"
+                )
+        if self.disposition is not None and self.disposition not in DISPOSITIONS:
+            raise SearchError(f"disposition must be one of {sorted(DISPOSITIONS)}")
+        for name in ("rule_id", "source_name"):
+            value = getattr(self, name)
+            if value is not None and (not value or len(value) > 128):
+                raise SearchError(f"{name} must be 1-128 characters")
+
+    def sql(self, alias: str) -> tuple[list[str], list[Any]]:
+        """WHERE fragments (fixed text, `?` placeholders only) and their
+        bound values, against the current-assessment relation `alias`."""
+        where: list[str] = []
+        params: list[Any] = []
+        if self.severity is not None:
+            where.append(f"{alias}.highest_severity = ?")
+            params.append(self.severity)
+        if self.min_severity is not None:
+            worse = [s.value for s in Severity if s.rank >= Severity(self.min_severity).rank]
+            where.append(f"{alias}.highest_severity IN ({','.join('?' for _ in worse)})")
+            params.extend(worse)
+        if self.rule_id is not None:
+            where.append(f"list_contains({alias}.rule_ids, ?)")
+            params.append(self.rule_id)
+        if self.disposition is not None:
+            where.append(f"{alias}.disposition = ?")
+            params.append(self.disposition)
+        if self.source_name is not None:
+            where.append(f"{alias}.source_name = ?")
+            params.append(self.source_name)
+        if self.flagged is True:
+            where.append(f"{alias}.hit_count > 0")
+        elif self.flagged is False:
+            where.append(f"{alias}.hit_count = 0")
+        if self.release_pending:
+            where.append(f"{alias}.release_pending = true")
+        return where, params
 
 
 def audit_terms(query: str, mode: str, key: bytes) -> dict[str, str]:
@@ -92,10 +203,37 @@ def audit_terms(query: str, mode: str, key: bytes) -> dict[str, str]:
     return {"query": query}
 
 
-def _snippet_pattern(q: str) -> str:
-    # The user never supplies regex syntax — this is an escaped literal
-    # wrapped in a fixed, server-authored pattern.
-    return f"(?i).{{0,60}}{re.escape(q)}.{{0,60}}"
+def run_query(sql: str, params: list[Any], timeout_seconds: float) -> list[tuple]:
+    """Run one read-only DuckDB query with a wall-clock budget.
+
+    DuckDB has no statement_timeout in this version, so a watchdog thread
+    interrupts the connection instead — "bound with a clock rather than
+    refuse the query". Timestamps are read in UTC: they were written as UTC
+    and are what chose each dt= partition, and DuckDB's default of the
+    host's local zone would misorder and mislabel rows near midnight.
+    """
+    con = duckdb.connect()
+    con.execute("SET TimeZone='UTC'")
+    timer = threading.Timer(timeout_seconds, con.interrupt)
+    timer.daemon = True
+    timer.start()
+    try:
+        return con.execute(sql, params).fetchall()
+    except duckdb.InterruptException as exc:
+        raise QueryTimeout(
+            f"query exceeded its {timeout_seconds}s budget — narrow the date range or query"
+        ) from exc
+    finally:
+        timer.cancel()
+        con.close()
+
+
+# The current assessment per job — a job accumulates one index row per
+# assessment, and every reader must only ever see the newest.
+LATEST_SQL = """
+    SELECT * FROM read_parquet(?, hive_partitioning = true, union_by_name = true)
+    QUALIFY row_number() OVER (PARTITION BY job_id ORDER BY assessment_seq DESC) = 1
+"""
 
 
 def search(
@@ -108,19 +246,19 @@ def search(
     limit: int = 100,
     timeout_seconds: float = 30.0,
     offset: int = 0,
+    *,
+    filters: IndexFilters | None = None,
 ) -> SearchResponse:
     if offset < 0:
         raise SearchError("offset must be nonnegative")
     if start and end and start > end:
         raise SearchError("Start date must be on or before end date")
-    if not q:
-        raise SearchError("query must not be empty")
-    if len(q) > MAX_QUERY_CHARS:
-        raise SearchError(f"search terms are limited to {MAX_QUERY_CHARS} characters")
-    if severity is not None and severity not in SEVERITIES:
-        raise SearchError(f"unknown severity {severity!r} — must be one of {sorted(SEVERITIES)}")
+    query = parse_query(q)
     if not 0 < limit <= MAX_LIMIT:
         raise SearchError(f"limit must be between 1 and {MAX_LIMIT}")
+    filters = filters or IndexFilters()
+    if severity is not None:
+        filters = IndexFilters(**{**filters.__dict__, "severity": severity})
 
     content_root = Path(content_root)
     index_root = Path(index_root)
@@ -133,78 +271,58 @@ def search(
     ):
         return SearchResponse(unbounded=start is None and end is None)
 
-    # ILIKE gives `%` and `_` meaning. The query is a literal search term,
-    # not a pattern language the user opted into — without escaping,
-    # searching for "100%" silently means "100 followed by anything", and
-    # a query of just "%" matches every document in the store.
-    escaped = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-    where = ["c.full_text ILIKE ? ESCAPE '\\'"]
-    params: list[Any] = [f"%{escaped}%"]
+    where: list[str] = []
+    params: list[Any] = []
+    for words in query.include:
+        where.append("regexp_matches(c.full_text, ?)")
+        params.append("(?i)" + _term_pattern(words))
+    for words in query.exclude:
+        where.append("NOT regexp_matches(c.full_text, ?)")
+        params.append("(?i)" + _term_pattern(words))
     if start is not None:
         where.append("c.dt >= ?")
         params.append(start)
     if end is not None:
         where.append("c.dt <= ?")
         params.append(end)
-    if severity is not None:
-        where.append("i.highest_severity = ?")
-        params.append(severity)
+    index_where, index_params = filters.sql("i")
+    where += index_where
+    params += index_params
+
+    # The snippet is centred on the first term. (?s) lets it run across the
+    # line breaks a wrapped phrase may contain; they are flattened below.
+    snippet = "(?is).{0,60}" + _term_pattern(query.include[0]) + ".{0,60}"
 
     # The only interpolation below is `where`, joined from the fixed
-    # literals built above ("c.dt >= ?" etc). Every VALUE — query, dates,
-    # severity, limit, and both parquet globs — is a bound parameter.
+    # fragments built above. Every VALUE is a bound parameter, bound in the
+    # order the placeholders appear: the index glob, the snippet pattern,
+    # the content glob, the WHERE clause, then LIMIT and OFFSET. One more
+    # row than the limit is asked for, so truncation is a length check.
     sql = f"""
-        WITH latest AS (
-            -- A job accumulates one index row per assessment;
-            -- search must only ever see the current one, or a reprocessed
-            -- job would show stale or duplicate results.
-            SELECT * FROM read_parquet(?, hive_partitioning = true, union_by_name = true)
-            QUALIFY row_number() OVER (PARTITION BY job_id ORDER BY assessment_seq DESC) = 1
-        )
+        WITH latest AS ({LATEST_SQL})
         SELECT i.job_id, i.received_at, i.page_count, i.disposition, i.highest_severity,
-               i.hit_count, i.archive_path,
-               regexp_extract(c.full_text, ?, 0) AS snippet
+               i.hit_count, i.archive_path, regexp_extract(c.full_text, ?, 0) AS snippet,
+               i.release_pending, i.source_name, i.rule_ids
         FROM read_parquet(?, hive_partitioning = true, union_by_name = true) AS c
         JOIN latest AS i USING (job_id)
         WHERE {" AND ".join(where)}
         ORDER BY i.received_at DESC, i.job_id
         LIMIT ? OFFSET ?
     """
-    content_glob = str(content_root / "dt=*" / "*.parquet")
-    index_glob = str(index_root / "dt=*" / "*.parquet")
-    # Bound in the exact order their `?` placeholders appear in the SQL
-    # text above: the WITH clause's read_parquet, then the snippet
-    # pattern, then the content-side read_parquet, then the WHERE clause.
-    # Ask for one more than the limit so truncation is a length check, not
-    # a second COUNT(*) query.
-    all_params = [index_glob, _snippet_pattern(q), content_glob, *params, limit + 1, offset]
+    all_params = [
+        str(index_root / "dt=*" / "*.parquet"),
+        snippet,
+        str(content_root / "dt=*" / "*.parquet"),
+        *params,
+        limit + 1,
+        offset,
+    ]
 
-    con = duckdb.connect()
-    # received_at was written as raw UTC; DuckDB defaults to converting
-    # TIMESTAMPTZ to the local system zone on read, which would both
-    # misorder/mislabel results near local midnight and disagree with the
-    # UTC dates dt= partitions and the audit trail use everywhere else.
-    con.execute("SET TimeZone='UTC'")
-    # DuckDB has no built-in statement_timeout in this version — interrupt
-    # the connection from a watchdog thread instead, the same "bound with
-    # a clock rather than refuse the query" guard.
-    timer = threading.Timer(timeout_seconds, con.interrupt)
-    timer.daemon = True
-    timer.start()
     started = time.monotonic()
-    try:
-        rows = con.execute(sql, all_params).fetchall()
-    except duckdb.InterruptException as exc:
-        raise QueryTimeout(
-            f"search exceeded its {timeout_seconds}s budget — narrow the date range or query"
-        ) from exc
-    finally:
-        timer.cancel()
-        con.close()
+    rows = run_query(sql, all_params, timeout_seconds)
     elapsed = time.monotonic() - started
 
     truncated = len(rows) > limit
-    rows = rows[:limit]
     results = [
         SearchResult(
             job_id=r[0],
@@ -214,9 +332,12 @@ def search(
             highest_severity=r[4],
             hit_count=r[5],
             archive_path=r[6],
-            snippet=r[7] or "",
+            snippet=" ".join((r[7] or "").split()),
+            release_pending=bool(r[8]),
+            source_name=r[9],
+            rule_ids=list(r[10] or []),
         )
-        for r in rows
+        for r in rows[:limit]
     ]
     logger.debug(
         "search: %d result(s) in %.3fs (truncated=%s) for query=%s",

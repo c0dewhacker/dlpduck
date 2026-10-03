@@ -6,8 +6,9 @@ session on every later request, never re-derived from a store:
   argon2id-hashed passwords, configured in `console.auth.users`. Never a
   plaintext password in config — hash one with `dlpduck console
   hash-password`.
-- OIDC (the primary path, implemented in dlpduck.console.oidc): an external IdP
-  authenticates the person; the roles come from an ID token claim.
+- OIDC (the primary path, the /login/oidc and /auth/callback routes in
+  dlpduck.console.app): an external IdP authenticates the person; the
+  roles come from an ID token claim.
 
 Because both write the same two session keys, RBAC (`require_permission`)
 and everything downstream of it don't know or care which path a session

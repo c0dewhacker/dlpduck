@@ -134,3 +134,102 @@ class TestScannedSensitiveDataIsCaught:
         response = search(pipeline.content_root, pipeline.index_root, "monthly")
 
         assert len(response.results) == 1
+
+
+def _mixed_pdf(native: list[tuple[float, str]], image_text: str | None, image_y: float = 500) -> bytes:
+    """Native text lines at the given heights, plus one raster image —
+    carrying `image_text`, or blank like a logo's background."""
+    import io
+
+    from PIL import Image, ImageDraw, ImageFont
+    from reportlab.lib.utils import ImageReader
+    from reportlab.pdfgen import canvas
+
+    image = Image.new("L", (900, 120), 255)
+    if image_text:
+        ImageDraw.Draw(image).text((10, 30), image_text, fill=0,
+                                   font=ImageFont.load_default(size=48))
+    out = io.BytesIO()
+    pdf = canvas.Canvas(out, pagesize=(595, 842))
+    pdf.setFont("Helvetica", 11)
+    for y, text in native:
+        pdf.drawString(72, y, text)
+    pdf.drawImage(ImageReader(image), 72, image_y, width=450, height=60)
+    pdf.showPage()
+    pdf.save()
+    return out.getvalue()
+
+
+class TestBlankPages:
+    """A page OCR reads nothing from is degraded — which quarantined every
+    duplex scan with a blank back. Now a page that is measurably blank is
+    counted as such, and anything with ink on it still fails closed."""
+
+    def test_a_blank_scanned_page_is_not_degraded(self, extractor):
+        from tests.pdf_factory import join_pdfs
+
+        text = extractor.extract(
+            join_pdfs(image_only_pdf(["Ordinary memo text"]), image_only_pdf(fill=255))
+        )
+
+        assert text.degraded is False
+        assert text.blank_page_count == 1
+        assert text.page_count == 2
+
+    def test_a_page_with_ink_ocr_could_not_read_is_still_degraded(self, extractor):
+        text = extractor.extract(image_only_pdf(fill=40))
+
+        assert text.degraded is True
+        assert text.blank_page_count == 0
+
+    def test_zero_restores_the_strict_behaviour(self):
+        strict = LineExtractor(dpi=150, blank_max_ink=0)
+        assert strict.extract(image_only_pdf(fill=255)).degraded is True
+
+    def test_a_document_with_a_blank_back_is_archived(self, tmp_path, monkeypatch):
+        from tests.pdf_factory import join_pdfs
+
+        monkeypatch.setenv("DLPDUCK_HMAC_KEY", "test-key-not-for-production")
+        src = tmp_path / "drops"
+        src.mkdir()
+        config = Config.model_validate({
+            "source": {"name": "t", "path": str(src), "metadata_format": "none"},
+            "destination": {"archive": str(tmp_path / "a"), "quarantine": str(tmp_path / "q"),
+                            "work_dir": str(tmp_path / "w")},
+            "extraction": {"isolate_worker": False},
+            "dlp": {"rules": [{"include": str(DEFAULT_RULES_PATH)}]},
+        })
+        pdf = tmp_path / "duplex.pdf"
+        pdf.write_bytes(join_pdfs(image_only_pdf(["Ordinary memo text"]), image_only_pdf()))
+
+        ctx = Pipeline(config).run_job(pdf, None, config.destination.work_dir / "_processing")
+
+        assert ctx.disposition == "archive"
+
+
+class TestPagesWithNativeTextAndImages:
+    """A page with a real text layer and an image used to discard the text
+    layer and OCR everything — a letterhead logo was enough to turn every
+    exact line into an OCR approximation."""
+
+    NATIVE = [(800, "CONFIDENTIAL banner header"), (700, "Native body line with plenty of text"),
+              (100, "Footer native line")]
+
+    def test_native_text_is_kept_exactly_beside_a_logo(self, extractor):
+        text = extractor.extract(_mixed_pdf(self.NATIVE, None))
+
+        assert [line.text for line in text.lines] == [t for _, t in self.NATIVE]
+        assert all(line.source == "native" for line in text.lines)
+        assert text.ocr_page_count == 0
+
+    def test_text_inside_the_image_is_added_in_reading_order(self, extractor):
+        text = extractor.extract(_mixed_pdf(self.NATIVE, "IMAGE SAYS ACCT-123456"))
+
+        texts = [line.text for line in text.lines]
+        assert texts[0] == "CONFIDENTIAL banner header"
+        assert texts[-1] == "Footer native line"
+        [ocr_line] = [line for line in text.lines if line.source == "ocr"]
+        assert "ACCT-123456" in ocr_line.text.replace(" ", "")
+        assert ocr_line.confidence is not None
+        assert texts.index(ocr_line.text) == 2  # between the body line and the footer
+        assert text.ocr_page_count == 1

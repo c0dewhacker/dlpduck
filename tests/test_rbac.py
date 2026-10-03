@@ -12,7 +12,6 @@ from dlpduck.console.rbac import (
     INVESTIGATOR,
     VIEWER,
     has_permission,
-    permissions_for,
 )
 
 
@@ -52,8 +51,8 @@ class TestSeparationOfDuties:
         assert has_permission({AUDITOR}, "jobs.text.read") is False
         assert has_permission({AUDITOR}, "jobs.pdf.read") is False
 
-    def test_auditor_cannot_change_rules_or_release_documents(self):
-        assert has_permission({AUDITOR}, "rules.write") is False
+    def test_auditor_cannot_manage_access_or_release_documents(self):
+        assert has_permission({AUDITOR}, "access.write") is False
         assert has_permission({AUDITOR}, "quarantine.release") is False
         assert has_permission({AUDITOR}, "jobs.purge") is False
 
@@ -85,13 +84,3 @@ class TestRoleComposition:
 
     def test_empty_roles_grants_nothing(self):
         assert has_permission(set(), "jobs.list") is False
-
-    def test_permissions_for_returns_the_full_grant_set(self):
-        perms = permissions_for({VIEWER})
-        assert "jobs.list" in perms
-        assert "dlp.reveal" not in perms
-
-    def test_permissions_for_union_across_multiple_roles(self):
-        perms = permissions_for({VIEWER, DLP_ADMIN})
-        assert "dlp.reveal" in perms  # only from dlp_admin
-        assert "jobs.list" in perms  # from either

@@ -60,7 +60,13 @@ class Rule:
         except regex.error as exc:
             raise RuleConfigError(f"rule {self.id!r} has an invalid pattern: {exc}") from None
 
-        self.severity = Severity(cfg.get("severity", "MEDIUM"))
+        try:
+            self.severity = Severity(cfg.get("severity", "MEDIUM"))
+        except ValueError:
+            raise RuleConfigError(
+                f"rule {self.id!r} has severity={cfg.get('severity')!r}, must be one of "
+                f"{[s.value for s in Severity]}"
+            ) from None
 
         action = cfg.get("action", "flag")
         if action not in _VALID_ACTIONS:
@@ -84,8 +90,17 @@ class Rule:
             )
         self.line_scope = line_scope
         self.from_end = bool(cfg.get("from_end", False))
-        self.min_line = cfg.get("min_line")
-        self.max_line = cfg.get("max_line")
+        self.min_line = _optional_line(self.id, "min_line", cfg.get("min_line"))
+        self.max_line = _optional_line(self.id, "max_line", cfg.get("max_line"))
+        if (
+            self.min_line is not None
+            and self.max_line is not None
+            and self.min_line > self.max_line
+        ):
+            raise RuleConfigError(
+                f"rule {self.id!r} has min_line {self.min_line} after max_line {self.max_line}"
+                " — the window would never match anything"
+            )
 
         validator_name = cfg.get("validator", "none")
         try:
@@ -94,17 +109,23 @@ class Rule:
             raise RuleConfigError(f"rule {self.id!r}: {exc}") from None
         self.validator_name = validator_name if validator_name != "none" else None
 
-        self.mask_keep: int = int(cfg.get("mask_keep", 0))  # masking is opt in
+        self.mask_keep: int = _non_negative_int(self.id, "mask_keep", cfg.get("mask_keep", 0))
 
         ctx = cfg.get("requires_context")
         if ctx:
+            if not isinstance(ctx, dict) or "pattern" not in ctx:
+                raise RuleConfigError(
+                    f"rule {self.id!r}: requires_context needs a 'pattern'"
+                )
             try:
                 self.ctx_regex: regex.Pattern | None = regex.compile(ctx["pattern"])
             except regex.error as exc:
                 raise RuleConfigError(
                     f"rule {self.id!r} has an invalid requires_context pattern: {exc}"
                 ) from None
-            self.ctx_window = int(ctx.get("within_lines", 2))
+            self.ctx_window = _non_negative_int(
+                self.id, "requires_context.within_lines", ctx.get("within_lines", 2)
+            )
         else:
             self.ctx_regex = None
             self.ctx_window = 0
@@ -130,6 +151,22 @@ class Rule:
 
     def __repr__(self) -> str:
         return f"Rule(id={self.id!r}, severity={self.severity.value}, action={self.action!r})"
+
+
+def _non_negative_int(rule_id: str, field: str, value: Any) -> int:
+    """A rule's integer setting, or a RuleConfigError naming the rule —
+    never a bare ValueError from int() with no hint which rule it was."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise RuleConfigError(
+            f"rule {rule_id!r} has {field}={value!r}, must be a whole number of 0 or more"
+        )
+    return value
+
+
+def _optional_line(rule_id: str, field: str, value: Any) -> int | None:
+    # A string here ("3") used to load fine and then raise TypeError while
+    # comparing positions — on the first document, not at boot.
+    return None if value is None else _non_negative_int(rule_id, field, value)
 
 
 BUILTIN_RULES_DIR = Path(__file__).parent / "builtin_rules"
@@ -178,10 +215,17 @@ def load_ruleset(entries: list[dict[str, Any]], base_dir: Path) -> list[Rule]:
     collected: dict[str, dict[str, Any]] = {}
     order: list[str] = []
 
-    def process(items: list[dict[str, Any]], relative_to: Path) -> None:
+    def process(items: list[dict[str, Any]], relative_to: Path, chain: tuple[Path, ...]) -> None:
         for item in items:
+            if not isinstance(item, dict):
+                raise RuleConfigError(f"rule entry must be a mapping, got {item!r}")
             if "include" in item:
                 include_path = _resolve_include(str(item["include"]), relative_to)
+                if include_path in chain:
+                    # Including a file from itself, directly or through
+                    # others, used to recurse until Python gave up.
+                    cycle = " -> ".join(str(p) for p in (*chain, include_path))
+                    raise RuleConfigError(f"rule includes form a cycle: {cycle}")
                 if not include_path.is_file():
                     hint = ""
                     if str(item["include"]).startswith(BUILTIN_PREFIX):
@@ -189,7 +233,9 @@ def load_ruleset(entries: list[dict[str, Any]], base_dir: Path) -> list[Rule]:
                     raise RuleConfigError(f"rule include not found: {include_path}{hint}")
                 with open(include_path, encoding="utf-8") as f:
                     doc = yaml.safe_load(f) or {}
-                process(doc.get("rules", []), include_path.parent)
+                if not isinstance(doc, dict):
+                    raise RuleConfigError(f"{include_path} must be a YAML mapping with a 'rules' list")
+                process(doc.get("rules", []), include_path.parent, (*chain, include_path))
             else:
                 rid = item.get("id")
                 if not rid:
@@ -198,7 +244,7 @@ def load_ruleset(entries: list[dict[str, Any]], base_dir: Path) -> list[Rule]:
                     order.append(rid)
                 collected[rid] = item
 
-    process(entries, base_dir)
+    process(entries, base_dir, ())
 
     rules: list[Rule] = []
     for rid in order:

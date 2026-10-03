@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import time
+from bisect import bisect_left
 
 from dlpduck.masking import correlate, mask
 from dlpduck.rules import Rule
@@ -99,6 +100,12 @@ class DLPEngine:
             if not rule.validator(raw):
                 continue
             line = text.line_at(m.start())
+            # The same position window a line-scope rule gets, judged by the
+            # line the match starts on. It used to be skipped here entirely,
+            # so a document-scope banner rule limited to the first lines of
+            # a page silently matched anywhere.
+            if not rule.in_range(line):
+                continue
             if rule.ctx_regex and not self._context_near(rule, text, line, budget):
                 continue
             # Rebase onto the line the hit is recorded against. These
@@ -117,10 +124,15 @@ class DLPEngine:
     ) -> bool:
         lo = line.line_number - rule.ctx_window
         hi = line.line_number + rule.ctx_window
-        for other in text.lines:
-            if lo <= other.line_number <= hi and rule.ctx_regex.search(
-                other.text, timeout=budget.remaining()
-            ):
+        # Lines are held in line_number order, so the window is a slice.
+        # Walking every line of the document for every candidate made a
+        # context rule O(lines x matches) on exactly the long documents
+        # where the per-rule time budget is tightest.
+        start = bisect_left(text.lines, lo, key=lambda candidate: candidate.line_number)
+        for other in text.lines[start:]:
+            if other.line_number > hi:
+                break
+            if rule.ctx_regex.search(other.text, timeout=budget.remaining()):
                 return True
         return False
 

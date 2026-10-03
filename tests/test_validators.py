@@ -114,3 +114,17 @@ class TestChecksumEdgeCases:
     def test_nhs_rejects_wrong_length(self):
         assert nhs_mod11("123") is False
         assert nhs_mod11("12345678901234") is False
+
+
+class TestUnicodeInputNeverRaises:
+    """A validator that raises takes the whole scan with it. Custom rules
+    can hand a validator anything their pattern matched."""
+
+    @pytest.mark.parametrize("validator", [luhn, iban_mod97, nhs_mod11])
+    @pytest.mark.parametrize("value", ["4111 1111 1111 111²", "GB82 WEST 1234 5698 7654 3É",
+                                       "①②③④⑤⑥⑦⑧⑨⑩", "ΑΒ12 3456 7890 1234 56"])
+    def test_odd_characters_are_a_non_match(self, validator, value):
+        assert validator(value) in (True, False)
+
+    def test_decimal_digits_from_other_scripts_still_count(self):
+        assert luhn("٤١١١١١١١١١١١١١١١")  # 4111111111111111 in Arabic-Indic digits

@@ -8,7 +8,6 @@ import json
 import re
 import shutil
 import threading
-from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -138,6 +137,16 @@ def _csrf_token(html: str) -> str:
     return match.group(1)
 
 
+def _beat(env, identity=None, **record):
+    from dlpduck import heartbeat
+
+    heartbeat.write(
+        env["config"].destination.work_dir,
+        identity or heartbeat.instance_identity(env["config"].cluster.identity),
+        record,
+    )
+
+
 def test_health_endpoints_report_process_and_watcher_state(env):
     client = env["client"]
     assert client.get("/health/live").json() == {"status": "ok"}
@@ -146,19 +155,44 @@ def test_health_endpoints_report_process_and_watcher_state(env):
     assert missing.status_code == 503
     assert missing.json()["watcher"]["stale"] is True
 
-    (env["config"].destination.work_dir / "watcher.json").write_text(
-        json.dumps(
-            {
-                "updated_at": datetime.now(UTC).isoformat(),
-                "state": "Watching",
-                "current_job": None,
-                "backlog": 0,
-            }
-        )
-    )
+    _beat(env, state="Watching", current_job=None, backlog=0)
     ready = client.get("/health/ready")
     assert ready.status_code == 200
     assert ready.json()["status"] == "ready"
+
+
+def test_the_unauthenticated_readiness_probe_names_no_document(env):
+    """The heartbeat carries the filename being processed and the backlog.
+    A probe needs neither, and it answers anyone who asks."""
+    _beat(env, state="Processing", current_job="Divorce filing - J Smith.pdf", backlog=7)
+    body = env["client"].get("/health/ready").json()
+
+    assert body == {"status": "ready", "watcher": {"state": "Processing", "stale": False}}
+
+
+class TestHeartbeatsArePerInstance:
+    """One shared watcher.json described whichever replica wrote last, and
+    a terminating pod's "Stopped" failed every pod's readiness at once."""
+
+    def test_another_pod_stopping_does_not_make_this_one_unready(self, env):
+        _beat(env, state="Watching")
+        _beat(env, identity="dlpduck-old-pod", state="Stopped")
+        assert env["client"].get("/health/ready").status_code == 200
+
+    def test_this_pod_stopping_does(self, env):
+        _beat(env, state="Stopped")
+        assert env["client"].get("/health/ready").status_code == 503
+
+    def test_a_console_with_no_watcher_of_its_own_uses_any_live_one(self, env):
+        _beat(env, identity="watcher-elsewhere", state="Watching")
+        assert env["client"].get("/health/ready").status_code == 200
+
+    def test_overview_shows_the_instance_doing_the_work(self, env):
+        _beat(env, state="Standby", backlog=3)
+        _beat(env, identity="dlpduck-leader", state="Processing", backlog=3)
+        client = env["client"]
+        _login(client, "admin1")
+        assert "Processing" in client.get("/").text
 
 
 def _login(client: TestClient, username: str) -> None:
@@ -1205,6 +1239,20 @@ class TestAuditScreen:
         assert resp.status_code == 200
         assert "Chain intact" in resp.text
 
+    def test_verify_shows_the_same_paged_view_as_the_audit_page(self, env):
+        """It used to render up to 500 events with no way to page on."""
+        for n in range(120):
+            env["pipeline"].audit.append("test.filler", n=n)
+        client = env["client"]
+        _login(client, "aud1")
+        page = client.get("/audit")
+
+        resp = client.post("/audit/verify", data={"csrf_token": _csrf_token(page.text)})
+
+        assert "Chain intact" in resp.text
+        assert resp.text.count("test.filler") <= 100
+        assert 'href="/audit?before=' in resp.text
+
     def test_verify_action_surfaces_redactions_alongside_intact(self, env):
         """The console must not answer "Chain intact." and stop when
         content has been deliberately emptied out of it — that reads as
@@ -1753,6 +1801,18 @@ class TestAuthenticationIsAuditedAndThrottled:
         [event] = self._auth_events(env, "auth.failed")
         assert "hunter2" not in json.dumps(event)
 
+    def test_an_unknown_username_is_recorded_only_as_a_digest(self, env):
+        """People type their password into the username box. The trail is
+        permanent and auditor-readable, so a name that is not an account is
+        never written as typed — but repeats of it still correlate."""
+        for _ in range(2):
+            env["client"].post("/login", data={"username": "Tr0ub4dor&3", "password": "x"})
+
+        events = self._auth_events(env, "auth.failed")
+        assert all(e["actor"] is None for e in events)
+        assert "Tr0ub4dor" not in json.dumps(events)
+        assert len({e["actor_hmac"] for e in events}) == 1
+
     def test_logging_out_is_recorded(self, env):
         client = env["client"]
         _login(client, "aud1")
@@ -1958,3 +2018,57 @@ class TestMalformedInputIsRefusedNotCrashed:
             )
             self._probe(client, "GET", "/login", params={"auth": value})
             self._probe(client, "GET", f"/jobs/{value}")
+
+
+def test_a_refused_scanner_image_downloads_as_what_it_is(env):
+    """An image refused at claim is kept as it arrived — serving it as
+    application/pdf would hand the browser a file it cannot open."""
+    pipeline, config = env["pipeline"], env["config"]
+    bad = config.source.path / "broken.tif"
+    bad.write_bytes(b"II*\x00" + b"\xff" * 32)
+    with pytest.raises(Exception):  # noqa: B017 — the refusal itself is covered elsewhere
+        pipeline.run_job(bad, None, config.destination.work_dir / "_processing")
+    [folder] = (config.destination.work_dir / "failed").iterdir()
+    client = env["client"]
+    _login(client, "admin1")
+
+    resp = client.get(f"/failed/failed/{folder.name}/pdf")
+
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "image/tiff"
+    assert resp.headers["content-disposition"].startswith("attachment")
+
+
+class TestRevealChecksTheRecordedMask:
+    """The candidate slice used to be checked against the rule's mask_keep
+    as configured today: a hit from a since-removed rule skipped the check
+    entirely, and one whose mask_keep had changed could never be revealed."""
+
+    def _doc(self, text):
+        from dlpduck.types import DocumentText, TextLine
+
+        doc = DocumentText(page_count=1)
+        doc.add_line(TextLine(0, 1, 0, 1, text, "native"))
+        return doc
+
+    def _hit(self, masked, start=5, end=24):
+        return {"line_number": 0, "start": start, "end": end, "masked_text": masked,
+                "rule_id": "gone.rule"}
+
+    def test_a_tail_kept_at_scan_time_still_verifies(self):
+        from dlpduck.console.app import _rederive_hit_value
+
+        doc = self._doc("Card 4111 1111 1111 1111 on file")
+        assert _rederive_hit_value(doc, self._hit("••••••••••••1111")) == "4111 1111 1111 1111"
+
+    def test_a_fully_masked_hit_still_verifies(self):
+        from dlpduck.console.app import _rederive_hit_value
+
+        doc = self._doc("Card 4111 1111 1111 1111 on file")
+        assert _rederive_hit_value(doc, self._hit("•" * 16)) == "4111 1111 1111 1111"
+
+    def test_text_that_no_longer_matches_the_mask_reveals_nothing(self):
+        from dlpduck.console.app import _rederive_hit_value
+
+        doc = self._doc("Card 4111 1111 1111 9999 on file")  # re-extracted differently
+        assert _rederive_hit_value(doc, self._hit("••••••••••••1111")) is None

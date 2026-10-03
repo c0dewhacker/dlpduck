@@ -22,7 +22,7 @@ import pyarrow.parquet as pq
 
 from dlpduck.durability import FileAlreadyExists, atomic_write
 from dlpduck.schema import INDEX_SCHEMA
-from dlpduck.types import JobContext
+from dlpduck.types import JobContext, hit_record
 
 logger = logging.getLogger("dlpduck.index")
 
@@ -35,23 +35,7 @@ def index_row(
     ruleset_version: str = "",
     supersedes_seq: int | None = None,
 ) -> dict:
-    hits = [
-        {
-            "rule_id": h.rule_id,
-            "rule_name": h.rule_name,
-            "severity": h.severity.value,
-            "action": h.action,
-            "page_number": h.page_number,
-            "line_number": h.line_number,
-            "line_on_page": h.line_on_page,
-            "start": h.start,
-            "end": h.end,
-            "masked_text": h.masked_text,  # never the raw value
-            "match_hmac": h.match_hmac,
-            "validator": h.validator,
-        }
-        for h in ctx.hits
-    ]
+    hits = [hit_record(h) for h in ctx.hits]
     highest = ctx.highest_severity
     return {
         "job_id": ctx.job_id,
@@ -180,9 +164,11 @@ def plan_compaction(index_root: Path, today: date | None = None) -> list[Compact
     linearly with the number of documents ever ingested. Measured: 0.08s
     at 500 files, 3.3s at 20,000, on an index that is permanent by default.
 
-    Today's partition is left alone. It is still being appended to, and
-    compacting underneath a live writer would race the exclusive-create
-    guard that stops two writers clobbering one assessment.
+    Today's partition is left alone: it is where ingest is writing, so
+    compacting it would only be undone within the hour. Older partitions
+    are not quiescent either — a reassessment is filed under the job's
+    original receipt date — which is why compact_partition() takes the
+    store's write lock.
     """
     index_root = Path(index_root)
     today = today or datetime.now(UTC).date()
@@ -202,17 +188,36 @@ def plan_compaction(index_root: Path, today: date | None = None) -> list[Compact
     return [p for p in plans if p.worth_doing]
 
 
-def compact_partition(plan: CompactionPlan) -> int:
+def compact_partition(plan: CompactionPlan, *, lock_root: Path | None = None) -> int:
     """Merge one partition's files into one. Returns bytes reclaimed.
 
-    Crash-safe by ordering, and it needs no lock: the merged file is
-    written and made visible *before* the originals are removed, so the
-    only window is one in which every row is present twice. That is
-    already harmless — every reader either QUALIFYs to one row per
-    job_id or selects DISTINCT — so a crash mid-compaction costs disk
-    space and nothing else, and re-running fixes it. The other order
-    would have a window with no rows at all.
+    Crash-safe by ordering: the merged file is written and made visible
+    *before* the originals are removed, so the only window is one in which
+    every row is present twice. That is already harmless — every reader
+    either QUALIFYs to one row per job_id or selects DISTINCT — so a crash
+    mid-compaction costs disk space and nothing else, and re-running fixes
+    it. The other order would have a window with no rows at all.
+
+    It does need the store's write lock (`lock_root`, the work_dir every
+    @serialized writer locks). Reprocessing appends to old partitions, and
+    picks its next sequence number by reading the current highest:
+    compaction deleting `<job>_0003.parquet` (merged) between that read
+    and an exclusive create of the same name let a second seq-3 row in.
+    The partition is re-listed under the lock, so only files that exist
+    at that moment are merged and removed.
     """
+    if lock_root is None:
+        return _compact(plan.partition, plan.files)
+    from dlpduck.operations import operation_lock
+
+    with operation_lock(lock_root):
+        return _compact(plan.partition, sorted(plan.partition.glob("*.parquet")))
+
+
+def _compact(partition: Path, files: list[Path]) -> int:
+    if len(files) < 2:
+        return 0
+    plan = CompactionPlan(partition=partition, files=files, bytes_before=0)
     tables = [pq.read_table(f) for f in plan.files]
     merged = pa.concat_tables(tables, promote_options="permissive")
     # Named so it cannot collide with an assessment file, whose names are

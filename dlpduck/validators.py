@@ -27,9 +27,21 @@ def get_validator(name: str) -> Callable[[str], bool]:
         raise ValueError(f"unknown validator {name!r} — known validators: {known}") from None
 
 
+def _digits(s: str) -> list[int]:
+    r"""The decimal digits in `s`, as ints.
+
+    isdecimal(), not isdigit(): isdigit() also accepts superscripts and
+    circled digits, which int() refuses — a custom rule matching "²" made
+    the validator raise and took the whole scan down with it. Decimal
+    digits from other scripts (Arabic-Indic, full-width) are kept: they are
+    real digits, `\d` matches them, and int() reads them correctly.
+    """
+    return [int(c) for c in s if c.isdecimal()]
+
+
 @validator("luhn")
 def luhn(s: str) -> bool:
-    digits = [int(c) for c in s if c.isdigit()]
+    digits = _digits(s)
     if not 13 <= len(digits) <= 19:
         return False
     total = 0
@@ -47,6 +59,10 @@ def iban_mod97(s: str) -> bool:
     value = "".join(c for c in s if c.isalnum()).upper()
     if len(value) < 15 or len(value) > 34:
         return False
+    # IBANs are ASCII by definition. int(c, 36) raised on any other letter
+    # (an accented capital from OCR, say), and that escaped the scan.
+    if not value.isascii():
+        return False
     rearranged = value[4:] + value[:4]
     digits = "".join(
         str(int(c, 36)) if c.isalpha() else c for c in rearranged
@@ -59,7 +75,7 @@ def iban_mod97(s: str) -> bool:
 
 @validator("nhs_mod11")
 def nhs_mod11(s: str) -> bool:
-    digits = [int(c) for c in s if c.isdigit()]
+    digits = _digits(s)
     if len(digits) != 10:
         return False
     weights = range(10, 1, -1)  # 10..2

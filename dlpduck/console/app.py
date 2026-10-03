@@ -6,6 +6,8 @@ air-gapped and break-glass fallback.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import logging
 from concurrent.futures import ThreadPoolExecutor
@@ -21,7 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from dlpduck import __version__
+from dlpduck import __version__, heartbeat
 from dlpduck.config import Config
 from dlpduck.console.auth import (
     LocalUserStore,
@@ -32,28 +34,31 @@ from dlpduck.console.auth import (
     require_permission,
 )
 from dlpduck.console.csrf import get_csrf_token, verify_csrf
+from dlpduck.console.queries import parse_date_param, relative_url
+from dlpduck.console.queries import register as register_queries
 from dlpduck.console.rbac import ALL_ROLES, has_permission
 from dlpduck.content import InvalidJobId, has_content, read_document_text, validate_job_id
 from dlpduck.failures import FailureQueue
+from dlpduck.images import sniff
 from dlpduck.index import AssessmentExists
 from dlpduck.masking import mask
 from dlpduck.pipeline import Pipeline
 from dlpduck.reprocess import Reprocessor, index_stats, latest_index_rows, parse_mode
-from dlpduck.search import QueryTimeout, SearchError, audit_terms
-from dlpduck.search import search as run_search
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
 
 logger = logging.getLogger("dlpduck.console")
 
-# The job list is unbounded by nature — every document ever ingested is a
-# row. Show the newest page of them and say when there are more, rather
-# than rendering a year of history into one table.
-JOBS_PAGE_SIZE = 100
+_FAILED_MEDIA = {
+    "pdf": ("application/pdf", "pdf"),
+    "tiff": ("image/tiff", "tif"),
+    "jpeg": ("image/jpeg", "jpg"),
+    "png": ("image/png", "png"),
+}
 
 
-def _rederive_hit_value(doc, hit: dict[str, Any], rules) -> str | None:
+def _rederive_hit_value(doc, hit: dict[str, Any]) -> str | None:
     """Recover a hit's cleartext from the content store.
 
     The raw value is never stored, so reveal re-derives it from the
@@ -79,26 +84,32 @@ def _rederive_hit_value(doc, hit: dict[str, Any], rules) -> str | None:
         return None
     candidate = doc.full_text[start:end]
 
-    rule = next((r for r in rules if r.id == hit["rule_id"]), None)
-    if rule is not None and mask(candidate, rule.mask_keep) != hit["masked_text"]:
+    # Checked against the mask as it was recorded, not as the rule's
+    # mask_keep says today. Looking the rule up instead meant a hit from a
+    # rule since removed was revealed with no check at all, and one whose
+    # mask_keep has since changed could never be revealed. The stored mask
+    # itself says how many trailing characters were kept.
+    masked = hit["masked_text"] or ""
+    keep = sum(1 for c in masked if c != "•")
+    if mask(candidate, keep) != masked:
         return None
     return candidate
 
 
-def _parse_date_param(value: str, field: str) -> date | None:
-    """Date filters arrive as raw query strings. They normally come from an
-    <input type="date">, but a bookmarked, hand-edited or truncated URL is
-    ordinary traffic too — and `date.fromisoformat` raising into the route
-    turned every one of those into a 500."""
-    if not value:
+def _first_seen(job: dict[str, Any], receipts: list[dict[str, Any]]) -> date | None:
+    """The earliest UTC date this job's content arrived, for bounding the
+    timeline's audit scan. Receipts cover every arrival, including failed
+    attempts that predate the indexed one; with none on record (a job from
+    before receipts existed) the whole trail is read, as before."""
+    if not receipts:
         return None
-    try:
-        return date.fromisoformat(value)
-    except ValueError:
-        raise HTTPException(
-            status_code=400,
-            detail=f"{field}={value!r} is not a date — use YYYY-MM-DD.",
-        ) from None
+    dates = [job["received_at"].date()]
+    for receipt in receipts:
+        try:
+            dates.append(datetime.fromisoformat(receipt["received_at"]).astimezone(UTC).date())
+        except (KeyError, TypeError, ValueError):
+            return None
+    return min(dates)
 
 
 def _json_or_empty(raw: Any) -> dict[str, Any]:
@@ -264,6 +275,10 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
         except (OSError, ValueError):
             return True  # unresolvable — fail closed
 
+    register_queries(
+        app, templates=templates, pipeline=pipeline, config=config, is_contained=_is_contained
+    )
+
     def _pdf_permission_for(job: dict[str, Any]) -> str:
         """Which permission this job's PDF needs. A quarantined document is
         gated more tightly than an archived one — same split as
@@ -308,7 +323,11 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
         can_release = has_permission(roles, "quarantine.release")
         pdf_permission_needed = _pdf_permission_for(job)
         can_view_pdf = has_permission(roles, pdf_permission_needed)
-        audit_events = pipeline.audit.events_for_job(job_id) if can_see_audit else []
+        receipts = pipeline.operations.receipts(job_id)
+        audit_events = (
+            pipeline.audit.events_for_job(job_id, since=_first_seen(job, receipts))
+            if can_see_audit else []
+        )
         # Purge never touches the index row because it proves the job
         # happened, so "was this purged" isn't a stored
         # field anywhere; it's derived the same way the PDF route already
@@ -339,7 +358,6 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
         can_purge = may_purge and reprocessable  # nothing left once both are gone
         can_reprocess_preview = may_reprocess and reprocessable
         can_reprocess_commit = has_permission(roles, "jobs.reprocess.commit") and reprocessable
-        receipts = pipeline.operations.receipts(job_id)
         for receipt in receipts:
             receipt["metadata"] = _json_or_empty(receipt.get("metadata"))
 
@@ -399,15 +417,12 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
             status_code=exc.status_code,
         )
 
+    identity = heartbeat.instance_identity(config.cluster.identity)
+    stale_after = max(config.source.poll_seconds * 3, 30)
+
     def _worker_health():
-        path = config.destination.work_dir / "watcher.json"
-        try:
-            health = json.loads(path.read_text())
-            age = (datetime.now(UTC) - datetime.fromisoformat(health["updated_at"])).total_seconds()
-            health["stale"] = age > max(config.source.poll_seconds * 3, 30)
-            return health
-        except (OSError, ValueError, KeyError):
-            return {"stale": True, "state": "No worker heartbeat", "backlog": None}
+        """This instance's watcher, for readiness (see dlpduck.heartbeat)."""
+        return heartbeat.own(config.destination.work_dir, identity, stale_after)
 
     @app.get("/health/live")
     def health_live() -> dict[str, str]:
@@ -421,7 +436,14 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
         ready = not worker["stale"] and worker.get("state") != "Stopped"
         if not ready:
             response.status_code = 503
-        return {"status": "ready" if ready else "not_ready", "watcher": worker}
+        # Unauthenticated, so only what a probe needs. The heartbeat also
+        # carries the drop-folder filename being processed and the backlog
+        # size — filenames are exactly what metadata_fields keeps out of
+        # the index by default — and those stay behind login, on Overview.
+        return {
+            "status": "ready" if ready else "not_ready",
+            "watcher": {"state": worker.get("state"), "stale": worker["stale"]},
+        }
 
     @app.get("/failed", response_model=None)
     def failed_jobs(request: Request, resolved: bool = False, page: int = Query(1, ge=1),
@@ -430,8 +452,8 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
         return templates.TemplateResponse(request, "failed.html", {
             "user": user, "items": rows[(page - 1) * 100:page * 100], "resolved": resolved,
             "csrf_token": get_csrf_token(request), "page": page,
-            "previous_url": str(request.url.include_query_params(page=page - 1)) if page > 1 else None,
-            "next_url": str(request.url.include_query_params(page=page + 1)) if len(rows) > page * 100 else None,
+            "previous_url": relative_url(request.url.include_query_params(page=page - 1)) if page > 1 else None,
+            "next_url": relative_url(request.url.include_query_params(page=page + 1)) if len(rows) > page * 100 else None,
             "flash": request.session.pop("queue_flash", None),
         })
 
@@ -443,8 +465,17 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
             raise HTTPException(404, str(exc)) from None
         if path.is_symlink() or not path.is_file():
             raise HTTPException(404, "Regular PDF unavailable")
+        # A scanner image refused at claim (undecodable, too many frames)
+        # is kept exactly as it arrived, so it may not be a PDF at all.
+        # Served as what it is, and as a download rather than inline.
+        with open(path, "rb") as handle:
+            detected = sniff(handle.read(1024))
+        media_type, extension = _FAILED_MEDIA.get(detected or "", ("application/octet-stream", "bin"))
         pipeline.audit.append("pdf.failed_viewed", job_id=job_id, actor=user.username)
-        return FileResponse(path, media_type="application/pdf", filename=f"{job_id}.pdf")
+        return FileResponse(
+            path, media_type=media_type, filename=f"{job_id}.{extension}",
+            content_disposition_type="inline" if detected == "pdf" else "attachment",
+        )
 
     @app.post("/failed/{kind}/{job_id}/{action}", response_model=None)
     def failed_action(request: Request, kind: str, job_id: str, action: str,
@@ -542,7 +573,7 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
                 "stats": stats,
                 "recent_jobs": recent,
                 "names": pipeline.operations.display_names(row["job_id"] for row in recent),
-                "health": _worker_health(),
+                "health": heartbeat.cluster(config.destination.work_dir, identity, stale_after),
                 "today": today_utc.isoformat(),
                 "extraction_timeout": config.extraction.timeout_seconds,
                 "can_verify": has_permission(set(user.roles), "audit.verify"),
@@ -574,6 +605,21 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
             },
         )
 
+    def _attempted_actor(username: str) -> dict[str, Any]:
+        """How a failed or throttled login names who tried.
+
+        The username box is free text from an anonymous caller, and the
+        audit trail is permanent. People type their password into it — and
+        that used to be recorded verbatim, forever, readable by auditors.
+        A name that is a configured account is recorded as-is (that is the
+        brute-force evidence an auditor wants); anything else only as a
+        keyed digest, so repeated attempts with one string still line up.
+        """
+        if app.state.user_store.get(username) is not None:
+            return {"actor": username}
+        digest = hmac.new(pipeline.config.hmac_key(), username.encode("utf-8"), hashlib.sha256)
+        return {"actor": None, "actor_hmac": digest.hexdigest()[:32]}
+
     @app.post("/login", response_model=None)
     def login_submit(
         request: Request, username: str = Form(...), password: str = Form(...)
@@ -602,7 +648,7 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
             # reaches the argon2 work — the point is to stop paying for
             # attempts, not just to stop believing them.
             pipeline.audit.append(
-                "auth.throttled", actor=username, client=client, method="local"
+                "auth.throttled", **_attempted_actor(username), client=client, method="local"
             )
             return _refuse("Too many failed attempts. Try again shortly.", 429)
 
@@ -613,7 +659,7 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
             # what they did once inside. Without it a brute-force campaign
             # leaves no trace in the one record an auditor actually reads.
             pipeline.audit.append(
-                "auth.failed", actor=username, client=client, method="local"
+                "auth.failed", **_attempted_actor(username), client=client, method="local"
             )
             return _refuse("Invalid username or password.", 401)
 
@@ -660,6 +706,7 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
 
             claims = token.get("userinfo") or {}
             username = claims.get("preferred_username") or claims.get("sub")
+            client = request.client.host if request.client else ""
             if not username:
                 # Same reasoning as the exchange failure above: a 401 here
                 # would redirect into /login, which redirects back into
@@ -682,7 +729,13 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
             # an IdP's own default/composite roles (e.g. Keycloak's
             # "offline_access") are noise here, not a privilege.
             external = claims.get(oidc_cfg.roles_claim) or []
-            mapped = {oidc_cfg.role_map.get(r, r) for r in external}
+            if isinstance(external, str):
+                # Some IdPs send a single role as a bare string. Iterating
+                # that granted nothing by accident — one character at a time.
+                external = [external]
+            if not isinstance(external, list):
+                external = []
+            mapped = {oidc_cfg.role_map.get(str(r), str(r)) for r in external}
             granted = frozenset(mapped & set(ALL_ROLES))
             if not granted:
                 pipeline.audit.append(
@@ -700,13 +753,36 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
                     ),
                 )
 
+            if app.state.user_store.get(username) is not None:
+                # An IdP username equal to a local account's would make the
+                # two indistinguishable everywhere a name is all there is —
+                # every audit event's actor, and "revoke all sessions for
+                # this user". Usernames at an IdP are often self-chosen, so
+                # this is refused rather than resolved by guessing.
+                pipeline.audit.append(
+                    "auth.failed", actor=username, client=client, method="oidc",
+                    reason="username_collides_with_local_account",
+                    subject=claims.get("sub"), issuer=claims.get("iss"),
+                )
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        f"the identity provider's username {username!r} is also a local account "
+                        "here; sign in with the local account, or have it renamed"
+                    ),
+                )
+
             establish_session(request, username, granted, method="oidc")
             pipeline.audit.append(
                 "auth.succeeded",
                 actor=username,
-                client=request.client.host if request.client else "",
+                client=client,
                 method="oidc",
                 roles=sorted(granted),
+                # The stable identifier behind the display name, so an
+                # auditor can tell two people apart if a name is reused.
+                subject=claims.get("sub"),
+                issuer=claims.get("iss"),
             )
             return RedirectResponse("/jobs", status_code=303)
 
@@ -720,48 +796,6 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
         if user is not None:
             pipeline.audit.append("auth.logout", actor=user.username)
         return RedirectResponse("/login?loggedout=1", status_code=303)
-
-    @app.get("/jobs", response_model=None)
-    def jobs_list(
-        request: Request,
-        disposition: str = "",
-        start: str = "",
-        end: str = "",
-        page: int = Query(1, ge=1, le=100000),
-        pending: bool = False,
-        user=Depends(require_permission("jobs.list")),
-    ) -> HTMLResponse | RedirectResponse:
-        if disposition == "failed":
-            return RedirectResponse("/failed", status_code=303)
-        if disposition not in ("", "archive", "quarantine"):
-            raise HTTPException(400, "Unknown disposition")
-        start_d = _parse_date_param(start, "start")
-        end_d = _parse_date_param(end, "end")
-        # Ask for one more than shown so "there is more" is a length check
-        # rather than a second counting query — the same trick search uses.
-        rows = latest_index_rows(
-            pipeline.index_root, start=start_d, end=end_d,
-            limit=JOBS_PAGE_SIZE + 1, newest_first=True,
-            disposition=disposition or None, release_pending=pending, offset=(page - 1) * JOBS_PAGE_SIZE,
-        )
-        truncated = len(rows) > JOBS_PAGE_SIZE
-        rows = rows[:JOBS_PAGE_SIZE]
-        return templates.TemplateResponse(
-            request,
-            "jobs_list.html",
-            {
-                "user": user,
-                "jobs": rows,
-                "truncated": truncated,
-                "page_size": JOBS_PAGE_SIZE,
-                "page": page,
-                "pending": pending,
-                "names": pipeline.operations.display_names(row["job_id"] for row in rows),
-                "previous_url": str(request.url.include_query_params(page=page - 1)) if page > 1 else None,
-                "next_url": str(request.url.include_query_params(page=page + 1)) if truncated else None,
-                "filters": {"disposition": disposition, "start": start, "end": end},
-            },
-        )
 
     @app.get("/jobs/{job_id}", response_model=None)
     def job_detail(
@@ -827,7 +861,7 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
         # position rather than from any value stored at scan time, since
         # none is: DLPHit never carries the raw match.
         doc = read_document_text(pipeline.content_root, job_id)
-        raw_value = _rederive_hit_value(doc, hit, pipeline.engine.rules)
+        raw_value = _rederive_hit_value(doc, hit)
 
         pipeline.audit.append(
             "dlp.revealed",
@@ -954,93 +988,6 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
             reprocess_result={"action": reprocess_action, "mode": mode, "outcome": outcome},
         )
 
-    @app.get("/search", response_model=None)
-    def search_page(
-        request: Request,
-        q: str = "",
-        severity: str = "",
-        start: str = "",
-        end: str = "",
-        page: int = Query(1, ge=1, le=100000),
-        user=Depends(require_permission("jobs.text.read")),
-    ) -> HTMLResponse:
-        # jobs.text.read, not jobs.list — a search result's snippet is a
-        # slice of raw full_text, the same content that gate protects
-        # everywhere else, so Viewer/Auditor don't get a search box.
-        context: dict[str, Any] = {
-            "user": user,
-            "filters": {"q": q, "severity": severity, "start": start, "end": end},
-            "response": None,
-            "error": None,
-            "page": page,
-            "previous_url": str(request.url.include_query_params(page=page - 1)) if page > 1 else None,
-            "next_url": None,
-        }
-        if q:
-            # Inline rather than a 400 page: this screen already reports a
-            # bad severity the same way, and the operator's query is right
-            # there in the form to correct.
-            try:
-                start_d = date.fromisoformat(start) if start else None
-                end_d = date.fromisoformat(end) if end else None
-            except ValueError:
-                context["error"] = "Start and end must be dates in YYYY-MM-DD form."
-                return templates.TemplateResponse(request, "search.html", context)
-            try:
-                response = run_search(
-                    pipeline.content_root,
-                    pipeline.index_root,
-                    q,
-                    start=start_d,
-                    end=end_d,
-                    severity=severity or None,
-                    offset=(page - 1) * 100,
-                )
-            except (SearchError, QueryTimeout) as exc:
-                context["error"] = str(exc)
-            else:
-                # A snippet is a raw slice of the document, so it belongs
-                # behind the same gate as opening that document. Without
-                # this, a quarantined document's PDF was admin-only while
-                # its text was searchable by any investigator — and since
-                # the snippet is centred on the match, searching a word
-                # near a hit returned the very value the quarantine, the
-                # masking, and the admin-only dlp.reveal all exist to
-                # protect. The result itself still shows (finding a
-                # quarantined document is the investigator's job); only
-                # the excerpt is withheld.
-                if not has_permission(set(user.roles), "jobs.pdf.read.quarantined"):
-                    for result in response.results:
-                        if _is_contained(result.disposition, result.archive_path):
-                            result.snippet = ""
-                            result.snippet_withheld = True
-                context["response"] = response
-                context["names"] = pipeline.operations.display_names(
-                    result.job_id for result in response.results
-                )
-                context["next_url"] = str(request.url.include_query_params(page=page + 1)) if response.truncated else None
-                # Same shape as the CLI's `dlpduck search` audit event —
-                # an unbounded search is legitimate, not an incident, but
-                # "who searched everything, and for what" stays answerable.
-                # Query recording follows console.audit_search_terms. The
-                # private default stores a keyed digest for correlation;
-                # deployments can explicitly choose readable terms.
-                pipeline.audit.append(
-                    "ui.search",
-                    actor=user.username,
-                    **audit_terms(
-                        q, config.console.audit_search_terms, pipeline.config.hmac_key()
-                    ),
-                    severity=severity or None,
-                    range=[
-                        start_d.isoformat() if start_d else None,
-                        end_d.isoformat() if end_d else None,
-                    ],
-                    unbounded=response.unbounded,
-                    results=len(response.results),
-                )
-        return templates.TemplateResponse(request, "search.html", context)
-
     @app.get("/rules", response_model=None)
     def rules_page(
         request: Request, user=Depends(require_permission("rules.read"))
@@ -1070,6 +1017,26 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
             {"user": user, "rules": rules_data, "ruleset_version": pipeline.ruleset_version},
         )
 
+    def _audit_context(request: Request, user, *, start: str, end: str, before: int | None,
+                       verify_result: dict[str, Any] | None = None) -> dict[str, Any]:
+        start_d = parse_date_param(start, "start")
+        end_d = parse_date_param(end, "end")
+        events = pipeline.audit.events(start=start_d, end=end_d, before=before, limit=101)
+        next_url = None
+        if len(events) > 100:
+            next_url = relative_url(
+                request.url.replace(path="/audit").include_query_params(before=events[99]["seq"])
+            )
+        return {
+            "user": user,
+            "events": events[:100],
+            "next_url": next_url,
+            "filters": {"start": start, "end": end},
+            "can_verify": has_permission(set(user.roles), "audit.verify"),
+            "verify_result": verify_result,
+            "csrf_token": get_csrf_token(request),
+        }
+
     @app.get("/audit", response_model=None)
     def audit_page(
         request: Request,
@@ -1078,21 +1045,8 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
         before: int | None = Query(None, gt=0),
         user=Depends(require_permission("audit.read")),
     ) -> HTMLResponse:
-        start_d = _parse_date_param(start, "start")
-        end_d = _parse_date_param(end, "end")
-        events = pipeline.audit.events(start=start_d, end=end_d, before=before, limit=101)
         return templates.TemplateResponse(
-            request,
-            "audit.html",
-            {
-                "user": user,
-                "events": events[:100],
-                "next_url": str(request.url.include_query_params(before=events[99]["seq"])) if len(events) > 100 else None,
-                "filters": {"start": start, "end": end},
-                "can_verify": has_permission(set(user.roles), "audit.verify"),
-                "verify_result": None,
-                "csrf_token": get_csrf_token(request),
-            },
+            request, "audit.html", _audit_context(request, user, start=start, end=end, before=before)
         )
 
     @app.post("/audit/verify", response_model=None)
@@ -1103,27 +1057,22 @@ def create_app(config: Config, pipeline: Pipeline) -> FastAPI:
     ) -> HTMLResponse:
         verify_csrf(request, csrf_token)
         result = pipeline.audit.verify()
-        events = pipeline.audit.events()
+        # The same first page, with the same paging, as GET /audit — this
+        # used to render up to 500 events with no way to page further.
+        verify_result = {
+            "ok": result.ok,
+            "breaks": result.breaks,
+            "detail": "; ".join(str(b) for b in result.breaks[:5]),
+            # Reported even when the chain is intact — an emptied event is
+            # a thing an auditor needs to see, and "no breaks" alone would
+            # imply nothing had been removed.
+            "redactions": result.redactions,
+            "redaction_detail": "; ".join(str(r) for r in result.redactions[:5]),
+        }
         return templates.TemplateResponse(
-            request,
-            "audit.html",
-            {
-                "user": user,
-                "events": events,
-                "filters": {"start": "", "end": ""},
-                "can_verify": True,
-                "verify_result": {
-                    "ok": result.ok,
-                    "breaks": result.breaks,
-                    "detail": "; ".join(str(b) for b in result.breaks[:5]),
-                    # Reported even when the chain is intact — an emptied
-                    # event is a thing an auditor needs to see, and "no
-                    # breaks" alone would imply nothing had been removed.
-                    "redactions": result.redactions,
-                    "redaction_detail": "; ".join(str(r) for r in result.redactions[:5]),
-                },
-                "csrf_token": get_csrf_token(request),
-            },
+            request, "audit.html",
+            _audit_context(request, user, start="", end="", before=None,
+                           verify_result=verify_result),
         )
 
     @app.get("/access", response_model=None)

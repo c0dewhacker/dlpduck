@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import logging
 import os
-import socket
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
@@ -29,6 +28,7 @@ from pathlib import Path
 import httpx
 
 from dlpduck.config import ClusterConfig, ConfigError
+from dlpduck.heartbeat import instance_identity
 
 logger = logging.getLogger("dlpduck.leader")
 
@@ -104,7 +104,7 @@ class KubernetesLeaseElection(LeaderElection):
                 "cluster.lease_namespace is not set and could not be read from "
                 f"{ns_path} — set it explicitly"
             )
-        self.identity = config.identity or os.environ.get("POD_NAME") or os.environ.get("HOSTNAME") or socket.gethostname()
+        self.identity = instance_identity(config.identity)
         self.lease_duration = config.lease_duration_seconds
         self.renew_interval = config.renew_interval_seconds
 

@@ -1,0 +1,24 @@
+{# Filters on the current assessment, shared by Jobs and Search so the two
+   mean the same thing by each one. Expects `filters`, `severities`,
+   `rule_ids` and `can_filter_rules` in the context. #}
+<div class="filter-field"><label for="min_severity">Severity</label><select id="min_severity" name="min_severity">
+  <option value="">any</option>
+  {% for s in severities %}
+  <option value="{{ s }}" {% if filters.min_severity == s %}selected{% endif %}>{{ s }} or worse</option>
+  {% endfor %}
+</select></div>
+{% if can_filter_rules %}
+<div class="filter-field"><label for="rule">Rule</label><select id="rule" name="rule">
+  <option value="">any rule</option>
+  {% for r in rule_ids %}
+  <option value="{{ r }}" {% if filters.rule == r %}selected{% endif %}>{{ r }}</option>
+  {% endfor %}
+  {% if filters.rule and filters.rule not in rule_ids %}<option value="{{ filters.rule }}" selected>{{ filters.rule }} (no longer active)</option>{% endif %}
+</select></div>
+{% endif %}
+<div class="filter-field"><label for="flagged">Hits</label><select id="flagged" name="flagged">
+  <option value="">with or without</option>
+  <option value="yes" {% if filters.flagged == "yes" %}selected{% endif %}>with hits</option>
+  <option value="no" {% if filters.flagged == "no" %}selected{% endif %}>no hits</option>
+</select></div>
+<div class="filter-field"><label for="source">Source</label><input id="source" type="text" name="source" value="{{ filters.source or '' }}" placeholder="any source" maxlength="128"></div>

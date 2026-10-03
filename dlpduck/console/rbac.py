@@ -41,7 +41,6 @@ _MATRIX: dict[str, tuple[Role, ...]] = {
     "dlp.reveal": (DLP_ADMIN,),  # cleartext
     "quarantine.release": (DLP_ADMIN,),
     "rules.read": ALL_ROLES,
-    "rules.write": (DLP_ADMIN,),
     "jobs.reprocess.preview": (INVESTIGATOR, DLP_ADMIN),
     "jobs.reprocess.commit": (DLP_ADMIN,),
     "jobs.purge": (DLP_ADMIN,),
@@ -61,6 +60,3 @@ def has_permission(roles: set[Role], permission: str) -> bool:
         raise ValueError(f"unknown permission: {permission!r}") from None
     return any(r in grantees for r in roles)
 
-
-def permissions_for(roles: set[Role]) -> set[str]:
-    return {perm for perm, grantees in _MATRIX.items() if any(r in grantees for r in roles)}

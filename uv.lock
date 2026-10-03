@@ -627,6 +627,7 @@ dependencies = [
     { name = "httpx" },
     { name = "itsdangerous" },
     { name = "jinja2" },
+    { name = "pillow" },
     { name = "pyarrow" },
     { name = "pydantic" },
     { name = "pypdfium2" },
@@ -664,6 +665,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "itsdangerous", specifier = ">=2.2.0" },
     { name = "jinja2", specifier = ">=3.1.6" },
+    { name = "pillow", specifier = ">=12.3.0" },
     { name = "pyarrow", specifier = ">=17.0" },
     { name = "pydantic", specifier = ">=2.10" },
     { name = "pypdfium2", specifier = ">=5.13.0" },
@@ -680,7 +682,7 @@ dev = [
     { name = "hypothesis", specifier = ">=6.100" },
     { name = "mypy", specifier = ">=2.3.1" },
     { name = "pip-audit", specifier = ">=2.10.1" },
-    { name = "pypdf", specifier = ">=6.18.0" },
+    { name = "pypdf", specifier = ">=6.19.0" },
     { name = "pytest", specifier = ">=8.3" },
     { name = "pytest-cov", specifier = ">=7.1" },
     { name = "pytest-xdist", specifier = ">=3.8.0" },
@@ -1780,11 +1782,11 @@ wheels = [
 
 [[package]]
 name = "pypdf"
-version = "6.18.0"
+version = "6.19.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/c2/c3/9fa0666f280552bd3833562d985b785fce1ddb3804937edd2fd6a3f2bdb3/pypdf-6.18.0.tar.gz", hash = "sha256:ae58b7d93c22c169ffb02c3b06321c45c4f223b4916536568adb57d789d95d01", size = 7024871, upload-time = "2026-09-07T16:48:16.444Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/1f/ac/63d71aaedb59acbcdef491e6ca6469165e3771c9c74358204818fd9bc5a6/pypdf-6.19.0.tar.gz", hash = "sha256:bbc43aca292369ccc6cbc8a921991ecf2538a3587ab5a116eff06c321d647155", size = 7033266, upload-time = "2026-09-16T09:32:05.946Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/c7/a5/d5922a078c9a612327681d4793404f82998f4d66213add6fdc0659245856/pypdf-6.18.0-py3-none-any.whl", hash = "sha256:05b762b77bcb9dcb4a7c91fcf5dded585b25bee7269ab3d3001d7c55fa1b324b", size = 393848, upload-time = "2026-09-07T16:48:14.254Z" },
+    { url = "https://files.pythonhosted.org/packages/3c/2c/c43c03eaf630435f023f1dc61ec4a4a78951ad5530a62c71cc89bde307b7/pypdf-6.19.0-py3-none-any.whl", hash = "sha256:7e5d6e730e7dae87d560a2cee218b852f6498c8be61966f3cd02ead971e48d14", size = 395480, upload-time = "2026-09-16T09:32:04.087Z" },
 ]
 
 [[package]]
@@ -2283,11 +2285,11 @@ wheels = [
 
 [[package]]
 name = "urllib3"
-version = "2.7.0"
+version = "2.8.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/53/0c/06f8b233b8fd13b9e5ee11424ef85419ba0d8ba0b3138bf360be2ff56953/urllib3-2.7.0.tar.gz", hash = "sha256:231e0ec3b63ceb14667c67be60f2f2c40a518cb38b03af60abc813da26505f4c", size = 433602, upload-time = "2026-05-07T16:13:18.596Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/e3/05/b17359e1cefb4f909b5e40b1b90a496d987258916dbbf88e842c729f510e/urllib3-2.8.0.tar.gz", hash = "sha256:63bf2ead4c879426ebf22ef2a781eeb4aa3b4ae798a0435506f8687fd5bb9b63", size = 458972, upload-time = "2026-09-15T19:29:36.253Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/7f/3e/5db95bcf282c52709639744ca2a8b149baccf648e39c8cc87553df9eae0c/urllib3-2.7.0-py3-none-any.whl", hash = "sha256:9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897", size = 131087, upload-time = "2026-05-07T16:13:17.151Z" },
+    { url = "https://files.pythonhosted.org/packages/92/9d/c4e665119135114480843e7ab388fa94d8480650450e6f8e26b70d323a4c/urllib3-2.8.0-py3-none-any.whl", hash = "sha256:0cf3cae568d36aa9576b28dfb35f11328f1cb974ca7647d9475ebb86c75ac6e3", size = 135717, upload-time = "2026-09-15T19:29:34.577Z" },
 ]
 
 [[package]]

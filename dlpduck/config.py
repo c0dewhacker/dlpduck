@@ -19,6 +19,13 @@ class SourceConfig(BaseModel):
     name: str
     path: Path
     pdf_suffix: str = ".pdf"
+    # Scanner image formats picked up alongside PDFs and converted to one
+    # at claim (see dlpduck.images). Matching, like pdf_suffix, ignores
+    # case — scanners routinely write SCAN0001.PDF or .TIF. An empty list
+    # turns image intake off.
+    image_suffixes: list[str] = Field(
+        default_factory=lambda: [".tif", ".tiff", ".jpg", ".jpeg", ".png"]
+    )
     metadata_format: Literal["xml", "json", "text", "none"] = "none"
     metadata_suffix: str = ".xml"
     metadata_fields: list[str] = Field(default_factory=list)  # allowlist only
@@ -32,6 +39,18 @@ class SourceConfig(BaseModel):
     metadata_grace_polls: int = Field(default=3, ge=0)
 
 
+    def accepts(self, name: str) -> bool:
+        """Is this drop-folder filename one this source picks up? Case is
+        ignored: a scanner writing SCAN0001.PDF must not leave documents
+        sitting unassessed in the drop folder forever."""
+        lowered = name.lower()
+        return any(
+            lowered.endswith(suffix.lower())
+            for suffix in (self.pdf_suffix, *self.image_suffixes)
+            if suffix
+        )
+
+
 class LimitsConfig(BaseModel):
     max_bytes: int = Field(default=200 * 1024 * 1024, gt=0)
     max_pages: int = Field(default=500, gt=0)
@@ -41,13 +60,30 @@ class LimitsConfig(BaseModel):
     # one-line PDF with a multi-gigabyte .xml beside it could exhaust the
     # daemon. Scanner metadata is a few KB; 1 MB is already generous.
     max_metadata_bytes: int = Field(default=1024 * 1024, gt=0)
+    # Per frame of a scanner image, checked from the image header before
+    # any pixel is decoded. 150 MP is an A3 page at 600 dpi with room to
+    # spare; a frame declaring more is refused rather than allocated.
+    max_image_pixels: int = Field(default=150_000_000, gt=0)
 
 
 class ExtractionConfig(BaseModel):
     dpi: int = Field(default=150, ge=36, le=600)
     timeout_seconds: float = Field(default=120, gt=0)
     isolate_worker: bool = True
+    # Address-space ceiling for each isolated worker, in MB. A hostile file
+    # that asks a parser for an enormous allocation then fails that one
+    # worker instead of pushing the host into swap or the OOM killer.
+    # This is address space, not resident memory: OCR reserves far more
+    # than it touches, and below about 4096 it silently reads nothing, so
+    # every scan fails closed as degraded. Null removes the cap.
+    worker_memory_mb: int | None = Field(default=4096, ge=512)
     native_min_chars: int = Field(default=20, ge=0)  # evaluated per page
+    # A page OCR reads nothing from is degraded (and so quarantines the
+    # document) unless at most this fraction of it is dark — i.e. it really
+    # is blank, like the back of a duplex scan. Tight by default: about 200
+    # pixels on an A4 page at 150 dpi, less ink than a nine-digit number.
+    # 0 treats every empty page as degraded.
+    blank_page_max_ink: float = Field(default=0.0001, ge=0, le=0.05)
 
 
 class DlpConfig(BaseModel):
@@ -160,6 +196,16 @@ class ConsoleConfig(BaseModel):
     # Repeated searches for the same term still correlate. "plain" is an
     # explicit policy choice for deployments that must retain exact queries.
     audit_search_terms: Literal["plain", "hashed"] = "hashed"
+    # Reverse proxies (an ingress controller, a TLS terminator) whose
+    # X-Forwarded-For / X-Forwarded-Proto headers are believed: a
+    # comma-separated list of addresses or CIDRs, or "*". Unset, only
+    # 127.0.0.1 is trusted. Behind any other proxy this matters twice: the
+    # login throttle keys on the client address, so every user shares the
+    # proxy's and ten bad logins from anyone lock everybody out; and the
+    # OIDC callback URL is built as http:// behind a TLS terminator. Never
+    # set "*" unless the console is reachable only through the proxy —
+    # anyone who can reach it directly could then choose their own address.
+    forwarded_allow_ips: str | None = None
     auth: ConsoleAuthConfig = Field(default_factory=ConsoleAuthConfig)
 
     def host_port(self) -> tuple[str, int]:
@@ -428,13 +474,19 @@ def validate_config(path: str | Path) -> Config:
     if not config.source.path.is_dir():
         raise ConfigError(f"source.path does not exist: {config.source.path}")
 
+    # Created with the configured umask's permissions, not the invoking
+    # shell's: `dlpduck run` validates before it applies the umask, so on
+    # a first start these were the only directories created world-readable.
+    mode = 0o777 & ~int(config.umask, 8) if config.umask is not None else 0o777
     for dest in (
         config.destination.archive,
         config.destination.quarantine,
         config.destination.work_dir,
         config.audit_dir,
     ):
-        dest.mkdir(parents=True, exist_ok=True)
+        if not dest.exists():
+            dest.mkdir(parents=True, exist_ok=True)
+            os.chmod(dest, mode)
 
     from dlpduck.plugins.loader import PluginConfigError
 
@@ -479,6 +531,14 @@ def config_warnings(config: Config) -> list[str]:
         warnings.append(
             f"console.bind is {config.console.bind} but session_cookie_secure is false — "
             "the session cookie will cross plain HTTP. Set it true and terminate TLS in front."
+        )
+
+    if host not in ("127.0.0.1", "::1", "localhost") and config.console.forwarded_allow_ips is None:
+        warnings.append(
+            f"console.bind is {config.console.bind} and console.forwarded_allow_ips is unset — if "
+            "a reverse proxy or ingress fronts the console, every request will appear to come "
+            "from the proxy: one login lockout then locks out everyone, and an OIDC callback "
+            "is built as http://. Set it to the proxy's address(es)."
         )
 
     if config.audit.integrity == "none":
