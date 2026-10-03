@@ -39,8 +39,6 @@ class LockContended(Exception):
 
 @contextmanager
 def operation_lock(root: Path, *, blocking: bool = True):
-    import fcntl
-
     root.mkdir(parents=True, exist_ok=True)
     key = str(root.resolve())
     with _REGISTRY_LOCK:
@@ -58,8 +56,42 @@ def operation_lock(root: Path, *, blocking: bool = True):
         if key in held:
             yield
             return
-        with open(root / ".operations.lock", "a+b") as lock:
-            os.chmod(lock.name, 0o600)
+        with _locked_file(root, key, blocking=blocking):
+            _HELD.roots = held | {key}
+            try:
+                yield
+            finally:
+                _HELD.roots = held
+    finally:
+        mutex.release()
+        _release_entry(key)
+
+
+@contextmanager
+def _locked_file(root: Path, key: str, *, blocking: bool):
+    """flock `root/.operations.lock`, making sure the file locked is still
+    the one at that path.
+
+    Per-job lock directories are deleted once a job is finished (see
+    Pipeline._discard_job_lock_dir). A caller already blocked on the old
+    file then acquires a lock on an unlinked inode, while a newcomer
+    creates a fresh file at the path and locks that — two holders of "the"
+    lock. Re-checking the path after acquiring, and starting again when it
+    no longer names the file locked, closes that: everyone who ends up
+    holding it holds the same inode.
+    """
+    import fcntl
+
+    path = root / ".operations.lock"
+    while True:
+        root.mkdir(parents=True, exist_ok=True)
+        try:
+            lock = open(path, "a+b")  # closed below on every path
+        except FileNotFoundError:
+            continue  # the directory was removed between mkdir and open
+        try:
+            # By descriptor: the name may already be gone again.
+            os.fchmod(lock.fileno(), 0o600)
             if blocking:
                 fcntl.flock(lock, fcntl.LOCK_EX)
             else:
@@ -67,15 +99,24 @@ def operation_lock(root: Path, *, blocking: bool = True):
                     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except OSError as exc:
                     raise LockContended(key) from exc
-            _HELD.roots = held | {key}
+            held = os.fstat(lock.fileno())
             try:
-                yield
-            finally:
-                _HELD.roots = held
+                current = os.stat(path)
+            except FileNotFoundError:
+                current = None
+            if current is None or (current.st_dev, current.st_ino) != (held.st_dev, held.st_ino):
                 fcntl.flock(lock, fcntl.LOCK_UN)
-    finally:
-        mutex.release()
-        _release_entry(key)
+                lock.close()
+                continue  # the file was replaced while we waited for it
+        except BaseException:
+            lock.close()
+            raise
+        try:
+            yield lock
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+            lock.close()
+        return
 
 
 def _release_entry(key: str) -> None:

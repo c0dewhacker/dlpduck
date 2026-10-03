@@ -29,16 +29,6 @@ _RANK = {
     Severity.CRITICAL: 4,
 }
 
-# quarantine > flag > ignore
-_ACTION_RANK = {"ignore": 0, "flag": 1, "quarantine": 2}
-
-
-def strongest_action(actions: list[str]) -> str:
-    if not actions:
-        return "ignore"
-    return max(actions, key=lambda a: _ACTION_RANK[a])
-
-
 @dataclass(frozen=True)
 class TextLine:
     line_number: int  # 0-indexed, document-global

@@ -828,3 +828,49 @@ class TestTheLockRegistryDoesNotGrowForever:
         release.set()
         thread.join()
         assert str((tmp_path / "busy").resolve()) not in operations._LOCAL_LOCKS
+
+
+class TestALockWhoseFileWasReplacedIsRetaken:
+    """A finished job's lock directory is deleted. Someone already blocked
+    on the old file must not end up holding a lock on the unlinked inode
+    while a newcomer holds one on the replacement."""
+
+    def test_a_waiter_on_a_deleted_lock_file_moves_to_the_new_one(self, tmp_path):
+        import os
+
+        from dlpduck import operations
+
+        root = tmp_path / "job"
+        acquired = threading.Event()
+        release_first = threading.Event()
+
+        def first():
+            with operations.operation_lock(root):
+                acquired.set()
+                release_first.wait(5)
+                shutil.rmtree(root)  # what _discard_job_lock_dir does, still holding
+
+        holder = threading.Thread(target=first)
+        holder.start()
+        acquired.wait(5)
+
+        # Straight to the file lock: two threads would otherwise serialise
+        # on the in-process mutex first, which is not what is under test.
+        root_lock_path = root / ".operations.lock"
+        got = []
+
+        def second():
+            try:
+                with operations._locked_file(root, "k", blocking=True) as lock:
+                    got.append(os.fstat(lock.fileno()).st_ino)
+                    got.append(os.stat(root_lock_path).st_ino)
+            except BaseException as exc:  # surfaced in the assertion below
+                got.append(exc)
+
+        waiter = threading.Thread(target=second)
+        waiter.start()
+        release_first.set()
+        holder.join(5)
+        waiter.join(5)
+
+        assert len(got) == 2 and got[0] == got[1], f"held a stale lock, or failed: {got}"

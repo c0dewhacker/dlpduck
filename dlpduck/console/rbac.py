@@ -60,6 +60,3 @@ def has_permission(roles: set[Role], permission: str) -> bool:
         raise ValueError(f"unknown permission: {permission!r}") from None
     return any(r in grantees for r in roles)
 
-
-def permissions_for(roles: set[Role]) -> set[str]:
-    return {perm for perm, grantees in _MATRIX.items() if any(r in grantees for r in roles)}
