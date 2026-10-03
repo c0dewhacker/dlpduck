@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.10](https://github.com/c0dewhacker/dlpduck/compare/v0.1.9...v0.1.10) (2026-10-03)
+
+
+### Features
+
+* scanner image intake, fuller query capability, and review-sweep fixes ([#28](https://github.com/c0dewhacker/dlpduck/issues/28)) ([b454d34](https://github.com/c0dewhacker/dlpduck/commit/b454d3466b2b39f7c32e0b27845f29fcc414baf3))
+
 ## [0.1.9](https://github.com/c0dewhacker/dlpduck/compare/v0.1.8...v0.1.9) (2026-09-12)
 
 
