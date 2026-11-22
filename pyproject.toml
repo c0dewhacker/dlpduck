@@ -57,7 +57,7 @@ dev = [
 docker = [
   # RapidOCR imports cv2 but does not use OpenCV's desktop UI. The Docker
   # build substitutes this wheel for its full opencv-python dependency.
-  "opencv-python-headless==5.0.0.93",
+  "opencv-python-headless==5.1.0.95",
 ]
 
 [tool.pytest.ini_options]
